@@ -98,6 +98,23 @@ export class AccountConnectionsController extends BaseDomainController {
     }
 
     const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
-    return apiUrl.replace(/\/api\/?$/, '').replace(':4000', ':3000');
+    try {
+      const parsedApiUrl = new URL(apiUrl);
+      const frontendPort = process.env.NEXT_PUBLIC_APP_URL
+        ? new URL(process.env.NEXT_PUBLIC_APP_URL).port
+        : '3000';
+
+      parsedApiUrl.pathname = '';
+      parsedApiUrl.search = '';
+      parsedApiUrl.hash = '';
+
+      if (frontendPort) {
+        parsedApiUrl.port = frontendPort;
+      }
+
+      return parsedApiUrl.toString().replace(/\/$/, '');
+    } catch {
+      return apiUrl.replace(/\/api\/?$/, '');
+    }
   }
 }

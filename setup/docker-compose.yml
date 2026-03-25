@@ -4,7 +4,7 @@ services:
     container_name: eselink-api
     restart: always
     environment:
-      PORT: 4000
+      PORT: ${API_PORT}
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       DB_DATABASE: ${DB_DATABASE}
@@ -31,7 +31,7 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
-      - "4000:4000"
+      - "${API_PORT}:${API_PORT}"
     networks:
       BODELINK_NETWORK:
         ipv4_address: 192.169.4.26
@@ -41,12 +41,12 @@ services:
     container_name: eselink-web
     restart: always
     environment:
-      PORT: 3000
+      PORT: ${WEB_PORT}
       HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL}
     ports:
-      - "3000:3000"
+      - "${WEB_PORT}:${WEB_PORT}"
     networks:
       BODELINK_NETWORK:
         ipv4_address: 192.169.4.27
