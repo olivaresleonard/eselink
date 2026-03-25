@@ -1,35 +1,25 @@
 import {Global, Module} from '@nestjs/common';
 import {ConfigModule} from '@nestjs/config';
-import {ConfigService} from '@nestjs/config';
 import {TypeOrmModule} from '@nestjs/typeorm';
+import { config as dotenvConfig } from 'dotenv';
+
+dotenvConfig();
 
 @Global()
 @Module({
   imports: [
     ConfigModule,
-    TypeOrmModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => {
-        const useSsl = configService.get<string>('DB_SSL', 'false') === 'true';
-
-        return {
-          type: 'postgres',
-          host: configService.get<string>('DB_HOST', 'localhost'),
-          port: Number(configService.get<string>('DB_PORT', '5432')),
-          username: configService.get<string>(
-            'DB_USERNAME', 'postgres'
-          ),
-          password: configService.get<string>(
-            'DB_PASSWORD', 'postgres'
-          ),
-          database: configService.get<string>(
-            'DB_DATABASE', 'eselink'
-          ),
-          ssl: useSsl ? {rejectUnauthorized: false} : false,
-          autoLoadEntities: true,
-          synchronize: true,
-        };
-      },
+    TypeOrmModule.forRoot({
+      type: 'postgres',
+      host: process.env.DB_HOST ?? 'localhost',
+      port: parseInt(process.env.DB_PORT ?? '5432', 10),
+      username: process.env.DB_USERNAME ?? 'postgres',
+      password: process.env.DB_PASSWORD ?? 'postgres',
+      database: process.env.DB_DATABASE ?? 'eselink',
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      autoLoadEntities: true,
+      synchronize: true,
+      useUTC: true,
     }),
   ],
   exports: [TypeOrmModule],
