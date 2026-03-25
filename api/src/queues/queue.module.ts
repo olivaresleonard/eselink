@@ -11,7 +11,10 @@ import { syncQueueNames } from '../modules/sync-jobs/sync-jobs.constants.js';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
         connection: {
-          url: configService.get<string>('REDIS_URL', 'redis://localhost:6379'),
+          host: configService.get<string>('REDIS_HOST', '127.0.0.1'),
+          port: Number(configService.get<string>('REDIS_PORT', '6379')),
+          password: configService.get<string>('REDIS_PASSWORD', ''),
+          db: Number(configService.get<string>('REDIS_DB', '0')),
         },
         defaultJobOptions: {
           attempts: 5,

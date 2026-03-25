@@ -8,6 +8,14 @@ on:
 
 env:
   PLATFORM: linux/amd64
+  DOCKER_NETWORK: BODELINK_NETWORK
+  API_CONTAINER_NAME: eselink-api
+  WEB_CONTAINER_NAME: eselink-web
+  API_CONTAINER_IP: 192.169.4.26
+  WEB_CONTAINER_IP: 192.169.4.27
+  API_PORT: 4000
+  WEB_PORT: 3000
+  WEB_PUBLIC_URL: ${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
 
 jobs:
   build-and-push:
@@ -19,14 +27,88 @@ jobs:
             image_name: eselink-api
             context: ./api
             dockerfile: ./api/Dockerfile
+            build_args: |
+              DB_HOST=${{ vars.DB_HOST || '127.0.0.1' }}
+              DB_PORT=${{ vars.DB_PORT || '5432' }}
+              DB_DATABASE=${{ vars.DB_DATABASE || 'eselink' }}
+              DB_USERNAME=${{ vars.DB_USERNAME || 'root' }}
+              DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+              DB_SSL=${{ vars.DB_SSL || 'false' }}
+              REDIS_HOST=${{ vars.REDIS_HOST || '127.0.0.1' }}
+              REDIS_PORT=${{ vars.REDIS_PORT || '6379' }}
+              REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+              REDIS_DB=${{ vars.REDIS_DB || '0' }}
+              PORT=${{ vars.PORT || '4000' }}
+              JWT_ACCESS_SECRET=${{ secrets.JWT_ACCESS_SECRET }}
+              JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}
+              JWT_ACCESS_TTL=${{ vars.JWT_ACCESS_TTL || '15m' }}
+              JWT_REFRESH_TTL=${{ vars.JWT_REFRESH_TTL || '7d' }}
+              MELI_CLIENT_ID=${{ secrets.MELI_CLIENT_ID }}
+              MELI_CLIENT_SECRET=${{ secrets.MELI_CLIENT_SECRET }}
+              MELI_REDIRECT_URI=${{ vars.MELI_REDIRECT_URI || format('{0}/api/account-connections/mercadolibre/oauth/callback', env.WEB_PUBLIC_URL) }}
+              MELI_API_BASE_URL=${{ vars.MELI_API_BASE_URL || 'https://api.mercadolibre.com' }}
+              MELI_AUTH_BASE_URL=${{ vars.MELI_AUTH_BASE_URL || 'https://auth.mercadolibre.com' }}
+              WEB_APP_URL=${{ env.WEB_PUBLIC_URL }}
+              NEXT_PUBLIC_APP_URL=${{ env.WEB_PUBLIC_URL }}
+              APP_URL=${{ env.WEB_PUBLIC_URL }}
+              FRONTEND_URL=${{ env.WEB_PUBLIC_URL }}
+              NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+              OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY || '' }}
           - service: web
             image_name: eselink-web
             context: ./web
             dockerfile: ./web/Dockerfile
+            build_args: |
+              NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+              NEXT_PUBLIC_APP_URL=${{ env.WEB_PUBLIC_URL }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Validate build configuration
+        run: |
+          missing=0
+
+          require_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "Missing secret: $name"
+              missing=1
+            fi
+          }
+
+          require_var() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "Missing variable: $name"
+              missing=1
+            fi
+          }
+
+          require_secret "DOCKER_USERNAME" "${{ secrets.DOCKER_USERNAME }}"
+          require_secret "DOCKER_PASSWORD" "${{ secrets.DOCKER_PASSWORD }}"
+          require_secret "DB_PASSWORD" "${{ secrets.DB_PASSWORD }}"
+          require_secret "REDIS_PASSWORD" "${{ secrets.REDIS_PASSWORD }}"
+          require_secret "JWT_ACCESS_SECRET" "${{ secrets.JWT_ACCESS_SECRET }}"
+          require_secret "JWT_REFRESH_SECRET" "${{ secrets.JWT_REFRESH_SECRET }}"
+          require_secret "MELI_CLIENT_ID" "${{ secrets.MELI_CLIENT_ID }}"
+          require_secret "MELI_CLIENT_SECRET" "${{ secrets.MELI_CLIENT_SECRET }}"
+
+          require_var "DB_HOST" "${{ vars.DB_HOST }}"
+          require_var "DB_PORT" "${{ vars.DB_PORT }}"
+          require_var "DB_DATABASE" "${{ vars.DB_DATABASE }}"
+          require_var "DB_USERNAME" "${{ vars.DB_USERNAME }}"
+          require_var "REDIS_HOST" "${{ vars.REDIS_HOST }}"
+          require_var "REDIS_PORT" "${{ vars.REDIS_PORT }}"
+          require_var "REDIS_DB" "${{ vars.REDIS_DB }}"
+          require_var "NEXT_PUBLIC_API_URL" "${{ vars.NEXT_PUBLIC_API_URL }}"
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -54,5 +136,182 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+          build-args: ${{ matrix.build_args }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_QA_ZERVO }}
+
+      - name: Validate deploy configuration
+        run: |
+          missing=0
+
+          require_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "Missing secret: $name"
+              missing=1
+            fi
+          }
+
+          require_secret "SSH_HOST_QA_ZERVO" "${{ secrets.SSH_HOST_QA_ZERVO }}"
+          require_secret "SSH_PORT_QA_ZERVO" "${{ secrets.SSH_PORT_QA_ZERVO }}"
+          require_secret "SSH_USER_QA_ZERVO" "${{ secrets.SSH_USER_QA_ZERVO }}"
+          require_secret "SSH_PRIVATE_KEY_QA_ZERVO" "${{ secrets.SSH_PRIVATE_KEY_QA_ZERVO }}"
+          require_secret "DOCKER_USERNAME" "${{ secrets.DOCKER_USERNAME }}"
+          require_secret "DOCKER_PASSWORD" "${{ secrets.DOCKER_PASSWORD }}"
+          require_secret "DB_PASSWORD" "${{ secrets.DB_PASSWORD }}"
+          require_secret "REDIS_PASSWORD" "${{ secrets.REDIS_PASSWORD }}"
+          require_secret "JWT_ACCESS_SECRET" "${{ secrets.JWT_ACCESS_SECRET }}"
+          require_secret "JWT_REFRESH_SECRET" "${{ secrets.JWT_REFRESH_SECRET }}"
+          require_secret "MELI_CLIENT_ID" "${{ secrets.MELI_CLIENT_ID }}"
+          require_secret "MELI_CLIENT_SECRET" "${{ secrets.MELI_CLIENT_SECRET }}"
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H -p ${{ secrets.SSH_PORT_QA_ZERVO }} ${{ secrets.SSH_HOST_QA_ZERVO }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy API and Web to server
+        run: |
+          ssh -p ${{ secrets.SSH_PORT_QA_ZERVO }} ${{ secrets.SSH_USER_QA_ZERVO }}@${{ secrets.SSH_HOST_QA_ZERVO }} << 'EOF'
+            set -e
+
+            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+            docker pull ${{ secrets.DOCKER_USERNAME }}/eselink-api:latest
+            docker pull ${{ secrets.DOCKER_USERNAME }}/eselink-web:latest
+
+            if ! docker network inspect ${{ env.DOCKER_NETWORK }} >/dev/null 2>&1; then
+              docker network create \
+                --driver bridge \
+                --subnet 192.169.4.0/24 \
+                ${{ env.DOCKER_NETWORK }}
+            fi
+
+            if [ "$(docker ps -aq -f name=${{ env.API_CONTAINER_NAME }})" ]; then
+              docker stop ${{ env.API_CONTAINER_NAME }} || true
+              docker rm ${{ env.API_CONTAINER_NAME }} || true
+            fi
+
+            if [ "$(docker ps -aq -f name=${{ env.WEB_CONTAINER_NAME }})" ]; then
+              docker stop ${{ env.WEB_CONTAINER_NAME }} || true
+              docker rm ${{ env.WEB_CONTAINER_NAME }} || true
+            fi
+
+            docker run -d \
+              --name ${{ env.API_CONTAINER_NAME }} \
+              --restart unless-stopped \
+              --network ${{ env.DOCKER_NETWORK }} \
+              --ip ${{ env.API_CONTAINER_IP }} \
+              -p ${{ env.API_PORT }}:${{ env.API_PORT }} \
+              --security-opt no-new-privileges:true \
+              --read-only \
+              --tmpfs /tmp \
+              --tmpfs /var/tmp \
+              --cap-drop ALL \
+              --cap-add NET_BIND_SERVICE \
+              -e DB_HOST='${{ vars.DB_HOST }}' \
+              -e DB_PORT='${{ vars.DB_PORT }}' \
+              -e DB_DATABASE='${{ vars.DB_DATABASE }}' \
+              -e DB_USERNAME='${{ vars.DB_USERNAME }}' \
+              -e DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
+              -e DB_SSL='${{ vars.DB_SSL }}' \
+              -e REDIS_HOST='${{ vars.REDIS_HOST }}' \
+              -e REDIS_PORT='${{ vars.REDIS_PORT }}' \
+              -e REDIS_PASSWORD='${{ secrets.REDIS_PASSWORD }}' \
+              -e REDIS_DB='${{ vars.REDIS_DB }}' \
+              -e PORT='${{ env.API_PORT }}' \
+              -e JWT_ACCESS_SECRET='${{ secrets.JWT_ACCESS_SECRET }}' \
+              -e JWT_REFRESH_SECRET='${{ secrets.JWT_REFRESH_SECRET }}' \
+              -e JWT_ACCESS_TTL='${{ vars.JWT_ACCESS_TTL || '15m' }}' \
+              -e JWT_REFRESH_TTL='${{ vars.JWT_REFRESH_TTL || '7d' }}' \
+              -e MELI_CLIENT_ID='${{ secrets.MELI_CLIENT_ID }}' \
+              -e MELI_CLIENT_SECRET='${{ secrets.MELI_CLIENT_SECRET }}' \
+              -e MELI_REDIRECT_URI='${{ vars.MELI_REDIRECT_URI || format('{0}/api/account-connections/mercadolibre/oauth/callback', env.WEB_PUBLIC_URL) }}' \
+              -e MELI_API_BASE_URL='${{ vars.MELI_API_BASE_URL || 'https://api.mercadolibre.com' }}' \
+              -e MELI_AUTH_BASE_URL='${{ vars.MELI_AUTH_BASE_URL || 'https://auth.mercadolibre.com' }}' \
+              -e WEB_APP_URL='${{ env.WEB_PUBLIC_URL }}' \
+              -e NEXT_PUBLIC_APP_URL='${{ env.WEB_PUBLIC_URL }}' \
+              -e APP_URL='${{ env.WEB_PUBLIC_URL }}' \
+              -e FRONTEND_URL='${{ env.WEB_PUBLIC_URL }}' \
+              -e NEXT_PUBLIC_API_URL='${{ vars.NEXT_PUBLIC_API_URL }}' \
+              -e OPENAI_API_KEY='${{ secrets.OPENAI_API_KEY }}' \
+              --health-cmd 'node -e "require(\"http\").get(\"http://localhost:${{ env.API_PORT }}/api/health\", (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"' \
+              --health-interval 30s \
+              --health-timeout 10s \
+              --health-retries 3 \
+              --health-start-period 40s \
+              ${{ secrets.DOCKER_USERNAME }}/eselink-api:latest
+
+            docker run -d \
+              --name ${{ env.WEB_CONTAINER_NAME }} \
+              --restart unless-stopped \
+              --network ${{ env.DOCKER_NETWORK }} \
+              --ip ${{ env.WEB_CONTAINER_IP }} \
+              -p ${{ env.WEB_PORT }}:${{ env.WEB_PORT }} \
+              --security-opt no-new-privileges:true \
+              --read-only \
+              --tmpfs /tmp \
+              --tmpfs /var/tmp \
+              --cap-drop ALL \
+              --cap-add NET_BIND_SERVICE \
+              -e PORT='${{ env.WEB_PORT }}' \
+              -e HOSTNAME='0.0.0.0' \
+              -e NEXT_PUBLIC_API_URL='${{ vars.NEXT_PUBLIC_API_URL }}' \
+              -e NEXT_PUBLIC_APP_URL='${{ env.WEB_PUBLIC_URL }}' \
+              --health-cmd 'node -e "require(\"http\").get(\"http://localhost:${{ env.WEB_PORT }}\", (r) => {process.exit(r.statusCode < 500 ? 0 : 1)})"' \
+              --health-interval 30s \
+              --health-timeout 10s \
+              --health-retries 3 \
+              --health-start-period 40s \
+              ${{ secrets.DOCKER_USERNAME }}/eselink-web:latest
+
+            if ! docker image prune -f; then
+              echo "docker prune en ejecucion, se omite en este deploy"
+            fi
+
+            docker ps -a | grep -E '${{ env.API_CONTAINER_NAME }}|${{ env.WEB_CONTAINER_NAME }}'
+          EOF
+
+      - name: Verify deployment
+        run: |
+          ssh -p ${{ secrets.SSH_PORT_QA_ZERVO }} ${{ secrets.SSH_USER_QA_ZERVO }}@${{ secrets.SSH_HOST_QA_ZERVO }} << 'EOF'
+            echo "Waiting for containers to start..."
+            sleep 10
+
+            if docker ps | grep -q ${{ env.API_CONTAINER_NAME }}; then
+              echo "API container is running"
+              docker logs --tail 30 ${{ env.API_CONTAINER_NAME }}
+            else
+              echo "API container is not running"
+              docker ps -a | grep ${{ env.API_CONTAINER_NAME }} || true
+              exit 1
+            fi
+
+            if docker ps | grep -q ${{ env.WEB_CONTAINER_NAME }}; then
+              echo "Web container is running"
+              docker logs --tail 30 ${{ env.WEB_CONTAINER_NAME }}
+            else
+              echo "Web container is not running"
+              docker ps -a | grep ${{ env.WEB_CONTAINER_NAME }} || true
+              exit 1
+            fi
+          EOF

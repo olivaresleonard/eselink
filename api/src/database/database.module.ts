@@ -1,7 +1,7 @@
-import { Global, Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
-import { ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import {Global, Module} from '@nestjs/common';
+import {ConfigModule} from '@nestjs/config';
+import {ConfigService} from '@nestjs/config';
+import {TypeOrmModule} from '@nestjs/typeorm';
 
 @Global()
 @Module({
@@ -11,21 +11,18 @@ import { TypeOrmModule } from '@nestjs/typeorm';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
         type: 'postgres',
-        url: configService.get<string>('DATABASE_URL'),
         host: configService.get<string>('DB_HOST', 'localhost'),
         port: Number(configService.get<string>('DB_PORT', '5432')),
         username: configService.get<string>(
-          'DB_USER',
-          configService.get<string>('POSTGRES_USER', 'postgres'),
+          'DB_USERNAME', 'postgres'
         ),
         password: configService.get<string>(
-          'DB_PASSWORD',
-          configService.get<string>('POSTGRES_PASSWORD', 'postgres'),
+          'DB_PASSWORD', 'postgres'
         ),
         database: configService.get<string>(
-          'DB_NAME',
-          configService.get<string>('POSTGRES_DB', 'eselink'),
+          'DB_DATABASE', 'eselink'
         ),
+        ssl: configService.get<string>('DB_SSL', 'false') === 'true',
         autoLoadEntities: true,
         synchronize: true,
       }),
@@ -33,4 +30,5 @@ import { TypeOrmModule } from '@nestjs/typeorm';
   ],
   exports: [TypeOrmModule],
 })
-export class DatabaseModule {}
+export class DatabaseModule {
+}

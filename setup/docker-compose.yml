@@ -3,57 +3,87 @@ services:
     image: ${API_IMAGE}
     container_name: eselink-api
     restart: always
-    depends_on:
-      - postgres
-      - redis
     environment:
       PORT: 4000
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://:123456@redis:6379
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_DATABASE: ${DB_DATABASE}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_SSL: ${DB_SSL}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: ${REDIS_DB}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
-      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
-      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL}
       MELI_CLIENT_ID: ${MELI_CLIENT_ID}
       MELI_CLIENT_SECRET: ${MELI_CLIENT_SECRET}
       MELI_REDIRECT_URI: ${MELI_REDIRECT_URI}
-      MELI_API_BASE_URL: ${MELI_API_BASE_URL:-https://api.mercadolibre.com}
-      MELI_AUTH_BASE_URL: ${MELI_AUTH_BASE_URL:-https://auth.mercadolibre.com}
+      MELI_API_BASE_URL: ${MELI_API_BASE_URL}
+      MELI_AUTH_BASE_URL: ${MELI_AUTH_BASE_URL}
+      WEB_APP_URL: ${WEB_APP_URL}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL}
+      APP_URL: ${APP_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "4000:4000"
+    networks:
+      BODELINK_NETWORK:
+        ipv4_address: 192.169.4.26
 
   web:
     image: ${WEB_IMAGE}
     container_name: eselink-web
     restart: always
-    depends_on:
-      - api
+    environment:
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL}
     ports:
       - "3000:3000"
+    networks:
+      BODELINK_NETWORK:
+        ipv4_address: 192.169.4.27
 
   postgres:
     container_name: postgres
     image: postgres:15.5
     restart: always
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-eselink}
-      POSTGRES_USER: ${POSTGRES_USER:-root}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      BODELINK_NETWORK:
+        ipv4_address: 192.169.4.10
 
   redis:
     container_name: redis
     image: redis:7-alpine
     restart: always
-    command: ["redis-server", "--save", "20", "1", "--loglevel", "warning", "--requirepass", "123456"]
+    command: ["redis-server", "--save", "20", "1", "--loglevel", "warning", "--requirepass", "${REDIS_PASSWORD}"]
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      BODELINK_NETWORK:
+        ipv4_address: 192.169.4.11
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  BODELINK_NETWORK:
+    external: true
