@@ -29,8 +29,7 @@ RUN if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile --prod; else p
 
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
-COPY --from=build /app/next.config.ts ./next.config.ts
-COPY --from=build /app/next-env.d.ts ./next-env.d.ts
+COPY --from=build /app/next.config.mjs ./next.config.mjs
 
 EXPOSE 3000
 CMD ["pnpm", "start"]
