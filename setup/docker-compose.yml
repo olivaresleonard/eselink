@@ -1,0 +1,59 @@
+services:
+  api:
+    image: ${API_IMAGE}
+    container_name: eselink-api
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:123456@redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      MELI_CLIENT_ID: ${MELI_CLIENT_ID}
+      MELI_CLIENT_SECRET: ${MELI_CLIENT_SECRET}
+      MELI_REDIRECT_URI: ${MELI_REDIRECT_URI}
+      MELI_API_BASE_URL: ${MELI_API_BASE_URL:-https://api.mercadolibre.com}
+      MELI_AUTH_BASE_URL: ${MELI_AUTH_BASE_URL:-https://auth.mercadolibre.com}
+    ports:
+      - "4000:4000"
+
+  web:
+    image: ${WEB_IMAGE}
+    container_name: eselink-web
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+  postgres:
+    container_name: postgres
+    image: postgres:15.5
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-eselink}
+      POSTGRES_USER: ${POSTGRES_USER:-root}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    container_name: redis
+    image: redis:7-alpine
+    restart: always
+    command: ["redis-server", "--save", "20", "1", "--loglevel", "warning", "--requirepass", "123456"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
