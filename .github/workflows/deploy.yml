@@ -15,52 +15,10 @@ env:
   WEB_CONTAINER_IP: 192.169.4.27
   API_PORT: 4000
   WEB_PORT: 3000
-  WEB_PUBLIC_URL: ${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - service: api
-            image_name: eselink-api
-            context: ./api
-            dockerfile: ./api/Dockerfile
-            build_args: |
-              DB_HOST=${{ vars.DB_HOST || '127.0.0.1' }}
-              DB_PORT=${{ vars.DB_PORT || '5432' }}
-              DB_DATABASE=${{ vars.DB_DATABASE || 'eselink' }}
-              DB_USERNAME=${{ vars.DB_USERNAME || 'root' }}
-              DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-              DB_SSL=${{ vars.DB_SSL || 'false' }}
-              REDIS_HOST=${{ vars.REDIS_HOST || '127.0.0.1' }}
-              REDIS_PORT=${{ vars.REDIS_PORT || '6379' }}
-              REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
-              REDIS_DB=${{ vars.REDIS_DB || '0' }}
-              PORT=${{ vars.PORT || '4000' }}
-              JWT_ACCESS_SECRET=${{ secrets.JWT_ACCESS_SECRET }}
-              JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}
-              JWT_ACCESS_TTL=${{ vars.JWT_ACCESS_TTL || '15m' }}
-              JWT_REFRESH_TTL=${{ vars.JWT_REFRESH_TTL || '7d' }}
-              MELI_CLIENT_ID=${{ secrets.MELI_CLIENT_ID }}
-              MELI_CLIENT_SECRET=${{ secrets.MELI_CLIENT_SECRET }}
-              MELI_REDIRECT_URI=${{ vars.MELI_REDIRECT_URI || format('{0}/api/account-connections/mercadolibre/oauth/callback', env.WEB_PUBLIC_URL) }}
-              MELI_API_BASE_URL=${{ vars.MELI_API_BASE_URL || 'https://api.mercadolibre.com' }}
-              MELI_AUTH_BASE_URL=${{ vars.MELI_AUTH_BASE_URL || 'https://auth.mercadolibre.com' }}
-              WEB_APP_URL=${{ env.WEB_PUBLIC_URL }}
-              NEXT_PUBLIC_APP_URL=${{ env.WEB_PUBLIC_URL }}
-              APP_URL=${{ env.WEB_PUBLIC_URL }}
-              FRONTEND_URL=${{ env.WEB_PUBLIC_URL }}
-              NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
-              OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY || '' }}
-          - service: web
-            image_name: eselink-web
-            context: ./web
-            dockerfile: ./web/Dockerfile
-            build_args: |
-              NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
-              NEXT_PUBLIC_APP_URL=${{ env.WEB_PUBLIC_URL }}
 
     steps:
       - name: Checkout code
@@ -119,24 +77,71 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Extract metadata
-        id: meta
+      - name: Extract API metadata
+        id: meta_api
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_USERNAME }}/${{ matrix.image_name }}
+          images: ${{ secrets.DOCKER_USERNAME }}/eselink-api
           tags: |
             type=raw,value=latest
 
-      - name: Build and push Docker image
+      - name: Build and push API image
         uses: docker/build-push-action@v5
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: ./api
+          file: ./api/Dockerfile
           platforms: ${{ env.PLATFORM }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
+          tags: ${{ steps.meta_api.outputs.tags }}
+          labels: ${{ steps.meta_api.outputs.labels }}
+          build-args: |
+            DB_HOST=${{ vars.DB_HOST }}
+            DB_PORT=${{ vars.DB_PORT }}
+            DB_DATABASE=${{ vars.DB_DATABASE }}
+            DB_USERNAME=${{ vars.DB_USERNAME }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            DB_SSL=${{ vars.DB_SSL || 'false' }}
+            REDIS_HOST=${{ vars.REDIS_HOST }}
+            REDIS_PORT=${{ vars.REDIS_PORT }}
+            REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+            REDIS_DB=${{ vars.REDIS_DB }}
+            PORT=4000
+            JWT_ACCESS_SECRET=${{ secrets.JWT_ACCESS_SECRET }}
+            JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}
+            JWT_ACCESS_TTL=${{ vars.JWT_ACCESS_TTL || '15m' }}
+            JWT_REFRESH_TTL=${{ vars.JWT_REFRESH_TTL || '7d' }}
+            MELI_CLIENT_ID=${{ secrets.MELI_CLIENT_ID }}
+            MELI_CLIENT_SECRET=${{ secrets.MELI_CLIENT_SECRET }}
+            MELI_REDIRECT_URI=${{ vars.MELI_REDIRECT_URI || 'https://eselink-web-qa.bodelink.com/api/account-connections/mercadolibre/oauth/callback' }}
+            MELI_API_BASE_URL=${{ vars.MELI_API_BASE_URL || 'https://api.mercadolibre.com' }}
+            MELI_AUTH_BASE_URL=${{ vars.MELI_AUTH_BASE_URL || 'https://auth.mercadolibre.com' }}
+            WEB_APP_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
+            NEXT_PUBLIC_APP_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
+            APP_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
+            FRONTEND_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+
+      - name: Extract Web metadata
+        id: meta_web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/eselink-web
+          tags: |
+            type=raw,value=latest
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          platforms: ${{ env.PLATFORM }}
+          push: true
+          tags: ${{ steps.meta_web.outputs.tags }}
+          labels: ${{ steps.meta_web.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_APP_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}
 
   deploy:
     needs: build-and-push
@@ -233,28 +238,28 @@ jobs:
               -e DB_DATABASE='${{ vars.DB_DATABASE }}' \
               -e DB_USERNAME='${{ vars.DB_USERNAME }}' \
               -e DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
-              -e DB_SSL='${{ vars.DB_SSL }}' \
+              -e DB_SSL='${{ vars.DB_SSL || 'false' }}' \
               -e REDIS_HOST='${{ vars.REDIS_HOST }}' \
               -e REDIS_PORT='${{ vars.REDIS_PORT }}' \
               -e REDIS_PASSWORD='${{ secrets.REDIS_PASSWORD }}' \
               -e REDIS_DB='${{ vars.REDIS_DB }}' \
-              -e PORT='${{ env.API_PORT }}' \
+              -e PORT='4000' \
               -e JWT_ACCESS_SECRET='${{ secrets.JWT_ACCESS_SECRET }}' \
               -e JWT_REFRESH_SECRET='${{ secrets.JWT_REFRESH_SECRET }}' \
               -e JWT_ACCESS_TTL='${{ vars.JWT_ACCESS_TTL || '15m' }}' \
               -e JWT_REFRESH_TTL='${{ vars.JWT_REFRESH_TTL || '7d' }}' \
               -e MELI_CLIENT_ID='${{ secrets.MELI_CLIENT_ID }}' \
               -e MELI_CLIENT_SECRET='${{ secrets.MELI_CLIENT_SECRET }}' \
-              -e MELI_REDIRECT_URI='${{ vars.MELI_REDIRECT_URI || format('{0}/api/account-connections/mercadolibre/oauth/callback', env.WEB_PUBLIC_URL) }}' \
+              -e MELI_REDIRECT_URI='${{ vars.MELI_REDIRECT_URI || 'https://eselink-web-qa.bodelink.com/api/account-connections/mercadolibre/oauth/callback' }}' \
               -e MELI_API_BASE_URL='${{ vars.MELI_API_BASE_URL || 'https://api.mercadolibre.com' }}' \
               -e MELI_AUTH_BASE_URL='${{ vars.MELI_AUTH_BASE_URL || 'https://auth.mercadolibre.com' }}' \
-              -e WEB_APP_URL='${{ env.WEB_PUBLIC_URL }}' \
-              -e NEXT_PUBLIC_APP_URL='${{ env.WEB_PUBLIC_URL }}' \
-              -e APP_URL='${{ env.WEB_PUBLIC_URL }}' \
-              -e FRONTEND_URL='${{ env.WEB_PUBLIC_URL }}' \
+              -e WEB_APP_URL='${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}' \
+              -e NEXT_PUBLIC_APP_URL='${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}' \
+              -e APP_URL='${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}' \
+              -e FRONTEND_URL='${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}' \
               -e NEXT_PUBLIC_API_URL='${{ vars.NEXT_PUBLIC_API_URL }}' \
               -e OPENAI_API_KEY='${{ secrets.OPENAI_API_KEY }}' \
-              --health-cmd 'node -e "require(\"http\").get(\"http://localhost:${{ env.API_PORT }}/api/health\", (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"' \
+              --health-cmd 'node -e "require(\"http\").get(\"http://localhost:4000/api/health\", (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"' \
               --health-interval 30s \
               --health-timeout 10s \
               --health-retries 3 \
@@ -273,11 +278,11 @@ jobs:
               --tmpfs /var/tmp \
               --cap-drop ALL \
               --cap-add NET_BIND_SERVICE \
-              -e PORT='${{ env.WEB_PORT }}' \
+              -e PORT='3000' \
               -e HOSTNAME='0.0.0.0' \
               -e NEXT_PUBLIC_API_URL='${{ vars.NEXT_PUBLIC_API_URL }}' \
-              -e NEXT_PUBLIC_APP_URL='${{ env.WEB_PUBLIC_URL }}' \
-              --health-cmd 'node -e "require(\"http\").get(\"http://localhost:${{ env.WEB_PORT }}\", (r) => {process.exit(r.statusCode < 500 ? 0 : 1)})"' \
+              -e NEXT_PUBLIC_APP_URL='${{ vars.NEXT_PUBLIC_APP_URL || 'https://eselink-web-qa.bodelink.com' }}' \
+              --health-cmd 'node -e "require(\"http\").get(\"http://localhost:3000\", (r) => {process.exit(r.statusCode < 500 ? 0 : 1)})"' \
               --health-interval 30s \
               --health-timeout 10s \
               --health-retries 3 \
