@@ -10,6 +10,7 @@ fi
 ROOT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="dev"
 INSTALL_DEPS="false"
+DOCKER_COMPOSE_FILE="setup/docker-compose.yml"
 PROJECTS=(
   "api"
   "web"
@@ -26,6 +27,7 @@ PROJECT_COLORS=(
 
 command -v pnpm >/dev/null 2>&1 || { echo "Error: pnpm no esta instalado."; exit 1; }
 command -v lsof >/dev/null 2>&1 || { echo "Error: lsof no esta instalado."; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "Error: docker no esta instalado."; exit 1; }
 command -v concurrently >/dev/null 2>&1 || {
   echo "Instalando 'concurrently' global..."
   npm i -g concurrently
@@ -47,7 +49,21 @@ kill_listener() {
   fi
 }
 
+docker_compose() {
+  docker compose -f "$ROOT_DIR/$DOCKER_COMPOSE_FILE" "$@"
+}
+
 cd "$ROOT_DIR"
+
+echo "Reiniciando infraestructura Docker..."
+docker_compose down --remove-orphans || true
+
+for PORT in "${PROJECT_PORTS[@]}"; do
+  kill_listener "$PORT"
+done
+
+docker_compose up -d
+echo
 
 NAMES=()
 CMDS=()
@@ -62,8 +78,6 @@ for i in "${!PROJECTS[@]}"; do
     echo "No se encontro package.json en $DIR, saltando..."
     continue
   fi
-
-  kill_listener "$PORT"
 
   if [[ "$INSTALL_DEPS" == "true" ]]; then
     CMD="cd \"$DIR\" && pnpm install && pnpm $RUN_SCRIPT"
