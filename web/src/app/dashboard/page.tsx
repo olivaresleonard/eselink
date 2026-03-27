@@ -3,7 +3,7 @@ import { PlatformLogo } from '../../components/platform-brand';
 import { PageShell } from '../../components/page-shell';
 import { fetchApi, formatCurrency } from '../../lib/api';
 
-export const revalidate = 60;
+export const dynamic = 'force-dynamic';
 
 type OrdersResponse = {
   data: Array<
