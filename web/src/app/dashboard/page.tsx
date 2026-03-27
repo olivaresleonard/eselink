@@ -3,6 +3,8 @@ import { PlatformLogo } from '../../components/platform-brand';
 import { PageShell } from '../../components/page-shell';
 import { fetchApi, formatCurrency } from '../../lib/api';
 
+export const revalidate = 60;
+
 type OrdersResponse = {
   data: Array<
     OrderRow & {

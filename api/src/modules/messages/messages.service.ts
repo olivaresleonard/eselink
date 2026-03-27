@@ -53,16 +53,63 @@ type MercadoLibreItemResponse = {
   }>;
 };
 
+type MercadoLibrePackResponse = {
+  id?: string | number;
+  orders?: Array<{
+    id?: string | number;
+  }>;
+};
+
+type MercadoLibreRemoteOrderResponse = {
+  id?: string | number;
+  status?: string | null;
+  buyer?: {
+    nickname?: string | null;
+    first_name?: string | null;
+    last_name?: string | null;
+  };
+  order_items?: Array<{
+    item?: Record<string, unknown> & {
+      id?: string;
+      title?: string;
+      thumbnail?: string | null;
+      picture_url?: string | null;
+    };
+  }>;
+  shipping?: {
+    id?: string | number;
+  };
+};
+
+type MercadoLibreShipmentResponse = {
+  status?: string | null;
+  substatus?: string | null;
+  logistic?: {
+    type?: string | null;
+    mode?: string | null;
+  };
+  logistic_type?: string | null;
+};
+
 type ConversationResourceInfo = {
   resourceType: string | null;
   resourceId: string | null;
   sellerId: string | null;
 };
 
+type RemoteOrderContext = {
+  productTitle: string | null;
+  productImageUrl: string | null;
+  customerName: string | null;
+  orderNumber: string | null;
+  shippingStage: string | null;
+};
+
 @Injectable()
 export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
   private readonly maxConversationsPerAccount = 80;
+  private readonly remoteOrderContextCache = new Map<string, Promise<RemoteOrderContext | null>>();
 
   constructor(
     @InjectRepository(Account)
@@ -132,6 +179,9 @@ export class MessagesService {
                     resourceInfo.sellerId,
                   );
                   const linkedOrder = this.findLinkedOrder(orders, resourceInfo.resourceId);
+                  const remoteOrderContext = linkedOrder
+                    ? null
+                    : await this.getRemoteOrderContext(account.id, resourceInfo);
 
                   return {
                     id: `${account.id}:${resource.resource}`,
@@ -148,11 +198,20 @@ export class MessagesService {
                     conversationStatus: detail.conversation_status?.status ?? null,
                     conversationSubstatus: detail.conversation_status?.substatus ?? null,
                     totalMessages: detail.paging?.total ?? messages.length,
-                    productTitle: this.getOrderTitle(linkedOrder),
-                    productImageUrl: await this.getOrderImage(linkedOrder, itemImageLookup),
-                    customerName: linkedOrder?.customerName ?? linkedOrder?.shippingName ?? null,
-                    orderNumber: linkedOrder?.orderNumber ?? null,
-                    shippingStage: linkedOrder?.shippingStage ?? null,
+                    productTitle:
+                      this.getOrderTitle(linkedOrder) ?? remoteOrderContext?.productTitle ?? null,
+                    productImageUrl:
+                      (await this.getOrderImage(linkedOrder, itemImageLookup)) ??
+                      remoteOrderContext?.productImageUrl ??
+                      null,
+                    customerName:
+                      linkedOrder?.customerName ??
+                      linkedOrder?.shippingName ??
+                      remoteOrderContext?.customerName ??
+                      null,
+                    orderNumber: linkedOrder?.orderNumber ?? remoteOrderContext?.orderNumber ?? null,
+                    shippingStage:
+                      linkedOrder?.shippingStage ?? remoteOrderContext?.shippingStage ?? null,
                     lastMessage: lastMessage
                       ? {
                           id: lastMessage.id ?? null,
@@ -252,6 +311,9 @@ export class MessagesService {
       input.accountId,
       linkedOrder ? [linkedOrder] : [],
     );
+    const remoteOrderContext = linkedOrder
+      ? null
+      : await this.getRemoteOrderContext(input.accountId, resourceInfo);
     const messages = detail.messages ?? [];
     const counterpartUserId = this.resolveCounterpartUserId(messages, resourceInfo.sellerId);
 
@@ -267,11 +329,20 @@ export class MessagesService {
       conversationStatus: detail.conversation_status?.status ?? null,
       conversationSubstatus: detail.conversation_status?.substatus ?? null,
       totalMessages: detail.paging?.total ?? messages.length,
-      productTitle: this.getOrderTitle(linkedOrder),
-      productImageUrl: await this.getOrderImage(linkedOrder, itemImageLookup),
-      customerName: linkedOrder?.customerName ?? linkedOrder?.shippingName ?? null,
-      orderNumber: linkedOrder?.orderNumber ?? null,
-      shippingStage: linkedOrder?.shippingStage ?? null,
+      productTitle:
+        this.getOrderTitle(linkedOrder) ?? remoteOrderContext?.productTitle ?? null,
+      productImageUrl:
+        (await this.getOrderImage(linkedOrder, itemImageLookup)) ??
+        remoteOrderContext?.productImageUrl ??
+        null,
+      customerName:
+        linkedOrder?.customerName ??
+        linkedOrder?.shippingName ??
+        remoteOrderContext?.customerName ??
+        null,
+      orderNumber: linkedOrder?.orderNumber ?? remoteOrderContext?.orderNumber ?? null,
+      shippingStage:
+        linkedOrder?.shippingStage ?? remoteOrderContext?.shippingStage ?? null,
       messages: messages.map((message) => ({
         id: message.id ?? null,
         text: message.text ?? '',
@@ -394,13 +465,12 @@ export class MessagesService {
     for (const order of orders) {
       const packId = this.extractPackId(order.rawPayload);
       const resourceId = packId ?? order.externalOrderId;
-      const resourceType = packId ? 'packs' : 'orders';
 
       if (!resourceId || !sellerId) {
         continue;
       }
 
-      const resource = `/${resourceType}/${resourceId}/sellers/${sellerId}`;
+      const resource = `/packs/${resourceId}/sellers/${sellerId}`;
       resources.set(resource, { resource });
     }
 
@@ -689,6 +759,257 @@ export class MessagesService {
 
     if (typeof packId === 'string' || typeof packId === 'number') {
       return String(packId);
+    }
+
+    return null;
+  }
+
+  private async getRemoteOrderContext(
+    accountId: string,
+    resourceInfo: ConversationResourceInfo,
+  ) {
+    if (!resourceInfo.resourceId || !resourceInfo.resourceType) {
+      return null;
+    }
+
+    const cacheKey = `${accountId}:${resourceInfo.resourceType}:${resourceInfo.resourceId}`;
+    const cached = this.remoteOrderContextCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const promise = this.fetchRemoteOrderContext(accountId, resourceInfo).catch((error) => {
+      this.logger.warn(
+        `No pudimos resolver contexto remoto para ${cacheKey}: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+      return null;
+    });
+
+    this.remoteOrderContextCache.set(cacheKey, promise);
+    return promise;
+  }
+
+  private async fetchRemoteOrderContext(
+    accountId: string,
+    resourceInfo: ConversationResourceInfo,
+  ): Promise<RemoteOrderContext | null> {
+    const accessToken = await this.authService.ensureAccessToken(accountId);
+    const externalOrderId = await this.resolveExternalOrderIdFromResource(
+      accessToken,
+      resourceInfo,
+    );
+
+    if (!externalOrderId) {
+      return null;
+    }
+
+    const order = await this.apiClient.request<MercadoLibreRemoteOrderResponse>(
+      `/orders/${externalOrderId}`,
+      {
+        accessToken,
+      },
+    );
+
+    const firstItem = order.order_items?.[0]?.item ?? null;
+    const productTitle =
+      typeof firstItem?.title === 'string' && firstItem.title.length > 0
+        ? firstItem.title
+        : null;
+    const directImage = this.extractImageUrlFromRawItem(firstItem);
+    const externalItemId =
+      typeof firstItem?.id === 'string' && firstItem.id.length > 0 ? firstItem.id : null;
+    const productImageUrl = directImage ?? (await this.fetchImageForExternalItem(accessToken, externalItemId));
+    const customerName = this.buildBuyerName(order.buyer);
+    const shippingStage = await this.fetchRemoteShippingStage(accessToken, order);
+
+    return {
+      productTitle,
+      productImageUrl,
+      customerName,
+      orderNumber: `ML-${externalOrderId}`,
+      shippingStage,
+    };
+  }
+
+  private async resolveExternalOrderIdFromResource(
+    accessToken: string,
+    resourceInfo: ConversationResourceInfo,
+  ) {
+    if (!resourceInfo.resourceId) {
+      return null;
+    }
+
+    if (resourceInfo.resourceType === 'orders') {
+      return resourceInfo.resourceId;
+    }
+
+    if (resourceInfo.resourceType !== 'packs') {
+      return null;
+    }
+
+    const pack = await this.apiClient.request<MercadoLibrePackResponse>(
+      `/packs/${resourceInfo.resourceId}`,
+      {
+        accessToken,
+      },
+    );
+
+    const firstOrderId = pack.orders?.[0]?.id;
+    if (typeof firstOrderId === 'string' || typeof firstOrderId === 'number') {
+      return String(firstOrderId);
+    }
+
+    return null;
+  }
+
+  private async fetchImageForExternalItem(accessToken: string, externalItemId: string | null) {
+    if (!externalItemId) {
+      return null;
+    }
+
+    try {
+      const item = await this.apiClient.request<MercadoLibreItemResponse>(`/items/${externalItemId}`, {
+        accessToken,
+      });
+      return this.extractImageUrlFromMercadoLibreItem(item);
+    } catch (error) {
+      this.logger.warn(
+        `No pudimos leer la imagen remota del item ${externalItemId}: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private buildBuyerName(
+    buyer?: {
+      nickname?: string | null;
+      first_name?: string | null;
+      last_name?: string | null;
+    } | null,
+  ) {
+    if (!buyer) {
+      return null;
+    }
+
+    if (buyer.nickname) {
+      return buyer.nickname;
+    }
+
+    const fullName = [buyer.first_name, buyer.last_name]
+      .map((part) => (typeof part === 'string' ? part.trim() : ''))
+      .filter(Boolean)
+      .join(' ');
+
+    return fullName || null;
+  }
+
+  private async fetchRemoteShippingStage(
+    accessToken: string,
+    order: MercadoLibreRemoteOrderResponse,
+  ) {
+    const shipmentId = order.shipping?.id;
+    if (shipmentId === undefined || shipmentId === null) {
+      return null;
+    }
+
+    try {
+      const shipment = await this.apiClient.request<MercadoLibreShipmentResponse>(
+        `/shipments/${shipmentId}`,
+        {
+          accessToken,
+          headers: {
+            'x-format-new': 'true',
+          },
+        },
+      );
+
+      return this.mapShippingStage(shipment);
+    } catch (error) {
+      this.logger.warn(
+        `No pudimos leer el shipment ${String(shipmentId)} para mensajería: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private mapShippingType(
+    shipment?: MercadoLibreShipmentResponse | null,
+  ): 'flex' | 'mercado_envios' | null {
+    const logisticType = shipment?.logistic?.type ?? shipment?.logistic_type;
+    const logisticMode = shipment?.logistic?.mode;
+
+    if (logisticType === 'self_service') {
+      return 'flex';
+    }
+
+    if (logisticMode === 'me2') {
+      return 'mercado_envios';
+    }
+
+    return null;
+  }
+
+  private mapShippingStage(
+    shipment?: MercadoLibreShipmentResponse | null,
+  ):
+    | 'ready_to_print'
+    | 'ready_to_ship'
+    | 'shipped'
+    | 'delivered'
+    | 'cancelled'
+    | 'rescheduled'
+    | null {
+    const shippingType = this.mapShippingType(shipment);
+    const shippingStatus = shipment?.status?.toLowerCase() ?? null;
+    const shippingSubstatus = shipment?.substatus?.toLowerCase() ?? null;
+    const isFlexRescheduled =
+      shippingType === 'flex' &&
+      [
+        'rescheduled',
+        'reprogrammed',
+        'reprogramado',
+        'buyer_rescheduled',
+        'receiver_absent',
+        'rescheduled_by_meli',
+      ].includes(shippingSubstatus ?? '');
+
+    if (shippingStatus === 'cancelled') {
+      return 'cancelled';
+    }
+
+    if (shippingStatus === 'delivered') {
+      return 'delivered';
+    }
+
+    if (isFlexRescheduled) {
+      return 'rescheduled';
+    }
+
+    if (shippingStatus === 'shipped') {
+      return 'shipped';
+    }
+
+    if (
+      shippingStatus === 'ready_to_ship' &&
+      ['in_hub', 'in_packing_list', 'picked_up', 'dropped_off'].includes(
+        shippingSubstatus ?? '',
+      )
+    ) {
+      return 'shipped';
+    }
+
+    if (shippingSubstatus === 'ready_to_print') {
+      return 'ready_to_print';
+    }
+
+    if (shippingStatus === 'ready_to_ship') {
+      return 'ready_to_ship';
     }
 
     return null;

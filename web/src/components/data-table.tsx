@@ -1,6 +1,6 @@
 'use client';
 
-import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import {
   ColumnDef,
   flexRender,
@@ -16,6 +16,7 @@ export function DataTable<TData>({
   description = 'Explora y filtra la información disponible.',
   searchPlaceholder = 'Buscar',
   defaultPageSize = 50,
+  headerActions,
 }: {
   data: TData[];
   columns: ColumnDef<TData>[];
@@ -23,6 +24,7 @@ export function DataTable<TData>({
   description?: string;
   searchPlaceholder?: string;
   defaultPageSize?: number;
+  headerActions?: ReactNode;
 }) {
   const [query, setQuery] = useState('');
   const [pageSize, setPageSize] = useState(defaultPageSize);
@@ -85,25 +87,28 @@ export function DataTable<TData>({
 
   return (
     <section className="overflow-hidden rounded-[1.6rem] border border-[var(--stroke)] bg-[var(--panel-strong)] shadow-panel backdrop-blur-xl">
-      <div className="flex flex-col gap-4 border-b border-black/5 p-5 sm:flex-row sm:items-end sm:justify-between">
-        <div>
+      <div className="flex flex-col gap-4 border-b border-black/5 p-5 sm:flex-row sm:items-end">
+        <div className="sm:flex-1">
           <h2 className="text-base font-semibold text-night">{title}</h2>
           <p className="mt-2 text-[11px] font-medium uppercase tracking-[0.16em] text-ink/40">
             {resultCount} {resultCount === 1 ? 'resultado' : 'resultados'}
           </p>
         </div>
-        <div className="w-full sm:max-w-xs">
-          <label className="sr-only" htmlFor="table-search">
-            Buscar
-          </label>
-          <input
-            id="table-search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            className="w-full rounded-xl border border-black/10 bg-white/90 px-4 py-2.5 text-sm text-ink outline-none transition placeholder:text-ink/35 focus:border-sky focus:ring-4 focus:ring-sky/10"
-            placeholder={`${searchPlaceholder}...`}
-            type="search"
-          />
+        <div className="flex w-full items-center justify-end gap-2 sm:ml-auto sm:max-w-md">
+          {headerActions ? <div className="shrink-0">{headerActions}</div> : null}
+          <div className="w-full sm:max-w-xs">
+            <label className="sr-only" htmlFor="table-search">
+              Buscar
+            </label>
+            <input
+              id="table-search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="w-full rounded-xl border border-black/10 bg-white/90 px-4 py-2.5 text-sm text-ink outline-none transition placeholder:text-ink/35 focus:border-sky focus:ring-4 focus:ring-sky/10"
+              placeholder={`${searchPlaceholder}...`}
+              type="search"
+            />
+          </div>
         </div>
       </div>
 

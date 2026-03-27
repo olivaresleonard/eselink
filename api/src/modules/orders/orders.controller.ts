@@ -18,6 +18,11 @@ export class OrdersController {
     return this.ordersService.findUnified(query);
   }
 
+  @Get('flex-today')
+  findFlexToday(@Query() query: GetOrdersQueryDto) {
+    return this.ordersService.findFlexToday(query);
+  }
+
   @Get('shipping-labels/bulk')
   async downloadShippingLabelsByQuery(
     @Query('orderIds') orderIds: string | string[] | undefined,
@@ -63,6 +68,11 @@ export class OrdersController {
   @Post(':id/assign')
   assign(@Param('id') id: string, @Body() body: AssignOrderDto) {
     return this.ordersService.assignOrder(id, body);
+  }
+
+  @Post(':id/cancel')
+  cancel(@Param('id') id: string) {
+    return this.ordersService.cancelOrder(id);
   }
 
   @Get(':id/comments')

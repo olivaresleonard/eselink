@@ -1,5 +1,6 @@
 'use client';
 
+import { useQueryClient } from '@tanstack/react-query';
 import type { Route } from 'next';
 import {
   ChevronLeft,
@@ -21,6 +22,8 @@ import { useRouter } from 'next/navigation';
 import { ComponentType, ReactNode, useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { clearStoredSession, getStoredSession, type AuthSession } from '../lib/auth';
+import { fetchApi } from '../lib/api';
+import { fetchOrdersDataset, getLocalDateKey, getOrdersDatasetQueryKey } from '../lib/orders-query';
 
 const SIDEBAR_SCROLL_STORAGE_KEY = 'eselink:sidebar-scroll-top';
 
@@ -104,6 +107,95 @@ const navigationGroups = [
   }>;
 }>;
 
+async function prefetchRouteData(pathname: Route, queryClient: ReturnType<typeof useQueryClient>) {
+  if (pathname === '/accounts') {
+    await Promise.all([
+      queryClient.prefetchQuery({
+        queryKey: ['accounts-page'],
+        queryFn: () => fetchApi('/accounts'),
+      }),
+      queryClient.prefetchQuery({
+        queryKey: ['orders-accounts-options'],
+        queryFn: () => fetchApi('/accounts'),
+      }),
+    ]);
+    return;
+  }
+
+  if (pathname === '/integrations') {
+    await queryClient.prefetchQuery({
+      queryKey: ['integrations-page-channels'],
+      queryFn: () => fetchApi('/channels'),
+    });
+    return;
+  }
+
+  if (pathname === '/products') {
+    await Promise.all([
+      queryClient.prefetchQuery({
+        queryKey: ['products-options'],
+        queryFn: () => fetchApi('/products'),
+      }),
+      queryClient.prefetchQuery({
+        queryKey: ['variants-options'],
+        queryFn: () => fetchApi('/product-variants'),
+      }),
+      queryClient.prefetchQuery({
+        queryKey: ['inventory-items-options'],
+        queryFn: () => fetchApi('/inventory'),
+      }),
+    ]);
+    return;
+  }
+
+  if (pathname === '/listings') {
+    await Promise.all([
+      queryClient.prefetchQuery({
+        queryKey: ['listings-page'],
+        queryFn: () => fetchApi('/listings'),
+      }),
+      queryClient.prefetchQuery({
+        queryKey: ['listings-variants-options'],
+        queryFn: () => fetchApi('/product-variants'),
+      }),
+      queryClient.prefetchQuery({
+        queryKey: ['listings-accounts-options'],
+        queryFn: () => fetchApi('/accounts'),
+      }),
+    ]);
+    return;
+  }
+
+  if (pathname === '/messages') {
+    await queryClient.prefetchQuery({
+      queryKey: ['messages-page'],
+      queryFn: () => fetchApi('/messages'),
+    });
+    return;
+  }
+
+  if (pathname === '/flex-today') {
+    await Promise.all([
+      queryClient.prefetchQuery({
+        queryKey: ['orders-accounts-options'],
+        queryFn: () => fetchApi('/accounts'),
+      }),
+      queryClient.prefetchQuery({
+        queryKey: getOrdersDatasetQueryKey('shippingToday', getLocalDateKey(), undefined, ''),
+        queryFn: () => fetchOrdersDataset('shippingToday', getLocalDateKey(), undefined, ''),
+      }),
+    ]);
+    return;
+  }
+
+  if (pathname === '/sync-logs') {
+    await queryClient.prefetchQuery({
+      queryKey: ['sync-logs-page'],
+      queryFn: () => fetchApi('/sync-logs'),
+    });
+  }
+}
+
 export function PageShell({
   title,
   description,
@@ -119,12 +211,14 @@ export function PageShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [session, setSession] = useState<AuthSession | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const navContainerRef = useRef<HTMLDivElement | null>(null);
   const activeItemRef = useRef<HTMLAnchorElement | null>(null);
+  const prefetchedRoutesRef = useRef(new Set<string>());
 
   useEffect(() => {
     function syncSession() {
@@ -205,6 +299,19 @@ export function PageShell({
 
   const userEmail = session.user.email;
 
+  function handleRoutePrefetch(href: Route) {
+    router.prefetch(href);
+
+    if (prefetchedRoutesRef.current.has(href)) {
+      return;
+    }
+
+    prefetchedRoutesRef.current.add(href);
+    void prefetchRouteData(href, queryClient).catch(() => {
+      prefetchedRoutesRef.current.delete(href);
+    });
+  }
+
   function SidebarContent({ compact = false }: { compact?: boolean }) {
     return (
       <>
@@ -260,6 +367,8 @@ export function PageShell({
                       href={item.href}
                       ref={active ? activeItemRef : null}
                       data-sidebar-active={active ? 'true' : 'false'}
+                      onMouseEnter={() => handleRoutePrefetch(item.href)}
+                      onFocus={() => handleRoutePrefetch(item.href)}
                       onClick={() => setSidebarOpen(false)}
                       className={`block rounded-[1rem] border transition ${
                         compact ? 'px-3 py-3 text-center' : 'px-4 py-3'

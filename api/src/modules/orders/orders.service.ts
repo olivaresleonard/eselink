@@ -2,7 +2,12 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { PDFDocument } from 'pdf-lib';
 import { Brackets, Repository } from 'typeorm';
-import { AccountStatus, PlatformCode } from '../../common/entities/domain.enums.js';
+import {
+  AccountStatus,
+  OrderEventType,
+  OrderStatus,
+  PlatformCode,
+} from '../../common/entities/domain.enums.js';
 import { BaseDomainService } from '../../common/services/base-domain.service.js';
 import { OperationContextService } from '../../core/operation-context/operation-context.service.js';
 import { MercadoLibreApiClient } from '../../integrations/mercadolibre/mercadolibre-api.client.js';
@@ -116,6 +121,39 @@ type StoredMercadoLibreFinancialSummary = {
   installments?: number | null;
   authorizationCode?: string | null;
   estimatedNetBeforeCost: number;
+};
+
+type FlexTodayStop = {
+  stopId: string;
+  packId: string | null;
+  externalOrderId: string;
+  accountId: string;
+  accountName: string | null;
+  platform: PlatformCode | undefined;
+  shipmentId: string | null;
+  customerName: string | null;
+  shippingAddress1: string | null;
+  shippingCity: string | null;
+  shippingRegion: string | null;
+  shippingCountry: string | null;
+  addressLabel: string;
+  geocodeQuery: string;
+  shippingType: 'flex' | 'mercado_envios' | null;
+  shippingStatus: string | null;
+  shippingStage:
+    | 'ready_to_print'
+    | 'ready_to_ship'
+    | 'shipped'
+    | 'delivered'
+    | 'cancelled'
+    | 'rescheduled'
+    | null;
+  shippingExpectedDate: string | null;
+  placedAt: string | null;
+  totalAmount: number;
+  totalUnits: number;
+  orderCount: number;
+  orderIds: string[];
 };
 
 @Injectable()
@@ -258,6 +296,8 @@ export class OrdersService extends BaseDomainService {
         totalAmount: Number(order.totalAmount),
         totalUnits: this.extractTotalUnits(order),
         profitAmount: this.calculateProfitAmount(order),
+        estimatedNetBeforeCost: this.getStoredMercadoLibreFinancialSummary(order.rawPayload)
+          ?.estimatedNetBeforeCost ?? null,
         currency: order.currency,
         placedAt: order.placedAt,
         importedAt: order.importedAt,
@@ -272,6 +312,76 @@ export class OrdersService extends BaseDomainService {
         total_pages: Math.ceil(total / limit),
       },
     };
+  }
+
+  async findFlexToday(query: GetOrdersQueryDto) {
+    const unified = await this.findUnified({
+      ...query,
+      onlyShippingToday: true,
+      limit: 500,
+      page: 1,
+    });
+
+    const groupedStops = new Map<string, FlexTodayStop>();
+
+    for (const order of unified.data) {
+      if (order.platform !== PlatformCode.MERCADOLIBRE || order.shippingType !== 'flex') {
+        continue;
+      }
+
+      const stopId = order.packId ?? order.externalOrderId;
+      const existing = groupedStops.get(stopId);
+
+      if (!existing) {
+        const placedAtValue = order.placedAt ?? order.importedAt ?? order.createdAt;
+        groupedStops.set(stopId, {
+          stopId,
+          packId: order.packId ?? null,
+          externalOrderId: order.externalOrderId,
+          accountId: order.accountId,
+          accountName: order.account ?? null,
+          platform: order.platform,
+          shipmentId: order.shipmentId ?? null,
+          customerName: order.customerName ?? null,
+          shippingAddress1: order.shippingAddress1 ?? null,
+          shippingCity: order.shippingCity ?? null,
+          shippingRegion: order.shippingRegion ?? null,
+          shippingCountry: order.shippingCountry ?? null,
+          addressLabel: this.buildFlexAddressLabel(order),
+          geocodeQuery: this.buildFlexGeocodeQuery(order),
+          shippingType: order.shippingType ?? null,
+          shippingStatus: order.shippingStatus ?? null,
+          shippingStage: order.shippingStage ?? null,
+          shippingExpectedDate: order.shippingExpectedDate ?? null,
+          placedAt:
+            typeof placedAtValue === 'string'
+              ? placedAtValue
+              : placedAtValue instanceof Date
+                ? placedAtValue.toISOString()
+                : null,
+          totalAmount: Number(order.totalAmount ?? 0),
+          totalUnits: Number(order.totalUnits ?? 0),
+          orderCount: 1,
+          orderIds: [order.id],
+        });
+        continue;
+      }
+
+      existing.totalAmount += Number(order.totalAmount ?? 0);
+      existing.totalUnits += Number(order.totalUnits ?? 0);
+      existing.orderCount += 1;
+      existing.orderIds.push(order.id);
+
+      if (!existing.customerName && order.customerName) {
+        existing.customerName = order.customerName;
+      }
+    }
+
+    return Array.from(groupedStops.values()).sort((left, right) => {
+      const leftTime = left.placedAt ? new Date(left.placedAt).getTime() : 0;
+      const rightTime = right.placedAt ? new Date(right.placedAt).getTime() : 0;
+      return rightTime - leftTime;
+    });
   }
 
   async refreshOpenSnapshots(accountId?: string) {
@@ -806,9 +916,14 @@ export class OrdersService extends BaseDomainService {
       return null;
     }
 
-    const accessToken = await this.mercadoLibreAuthService.ensureAccessToken(account.id);
-    accessTokenByAccountId.set(accountId, accessToken);
-    return accessToken;
+    try {
+      const accessToken = await this.mercadoLibreAuthService.ensureAccessToken(account.id);
+      accessTokenByAccountId.set(accountId, accessToken);
+      return accessToken;
+    } catch {
+      accessTokenByAccountId.set(accountId, null);
+      return null;
+    }
   }
 
   private extractPurchaseSummary(order: Order, purchaseGroupSizes: Map<string, number>) {
@@ -1460,6 +1575,52 @@ export class OrdersService extends BaseDomainService {
     }).format(date);
   }
 
+  private buildFlexAddressLabel(order: {
+    shippingAddress1?: string | null;
+    shippingCity?: string | null;
+    shippingRegion?: string | null;
+    shippingCountry?: string | null;
+  }) {
+    return [
+      order.shippingAddress1,
+      order.shippingCity,
+      order.shippingRegion,
+      order.shippingCountry,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join(', ');
+  }
+
+  private buildFlexGeocodeQuery(order: {
+    shippingAddress1?: string | null;
+    shippingCity?: string | null;
+    shippingRegion?: string | null;
+    shippingCountry?: string | null;
+  }) {
+    return [
+      this.sanitizeFlexAddressSegment(order.shippingAddress1),
+      order.shippingCity,
+      order.shippingRegion,
+      order.shippingCountry,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join(', ');
+  }
+
+  private sanitizeFlexAddressSegment(value?: string | null) {
+    if (!value) {
+      return null;
+    }
+
+    return value
+      .replace(/referencia:.*$/i, '')
+      .replace(/\b(depto|departamento|dpto|oficina|of|casa)\b.*$/i, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s+,/g, ',')
+      .trim()
+      .replace(/,$/, '');
+  }
+
   async findOrderDetail(id: string) {
     const order = await this.ordersOrmRepository.findOne({
       where: { id },
@@ -1531,6 +1692,61 @@ export class OrdersService extends BaseDomainService {
     assignment.assignedAt = new Date();
 
     return this.orderAssignmentsRepository.save(assignment);
+  }
+
+  async cancelOrder(orderId: string) {
+    const order = await this.ordersOrmRepository.findOne({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    const currentStage = order.shippingStage?.toLowerCase() ?? null;
+    const currentStatus = order.status?.toLowerCase() ?? null;
+    const currentShippingStatus = order.shippingStatus?.toLowerCase() ?? null;
+
+    if (currentStage === 'delivered' || currentStatus === OrderStatus.DELIVERED) {
+      throw new BadRequestException('No puedes cancelar una orden que ya fue entregada.');
+    }
+
+    if (currentStage === 'rescheduled') {
+      throw new BadRequestException('No puedes cancelar una orden reprogramada desde esta vista.');
+    }
+
+    if (currentStage === 'cancelled' || currentShippingStatus === 'cancelled') {
+      return this.findOrderDetail(orderId);
+    }
+
+    order.status = OrderStatus.CANCELED;
+    order.externalStatus = 'cancelled';
+    order.shippingStatus = 'cancelled';
+    order.shippingStage = 'cancelled';
+    order.shippingSyncedAt = new Date();
+
+    await this.ordersOrmRepository.save(order);
+
+    await this.orderEventsRepository.save(
+      this.orderEventsRepository.create({
+        workspaceId: order.workspaceId,
+        orderId: order.id,
+        type: OrderEventType.STATUS_CHANGED,
+        externalStatus: 'cancelled',
+        notes: 'Orden cancelada manualmente desde Eselink.',
+        payload: {
+          source: 'eselink_manual_cancel',
+          previousStage: currentStage,
+          previousStatus: currentStatus,
+          previousShippingStatus: currentShippingStatus,
+          nextStage: 'cancelled',
+          nextStatus: OrderStatus.CANCELED,
+          nextShippingStatus: 'cancelled',
+        },
+      }),
+    );
+
+    return this.findOrderDetail(orderId);
   }
 
   async listComments(orderId: string) {

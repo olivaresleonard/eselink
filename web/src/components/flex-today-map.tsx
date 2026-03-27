@@ -46,11 +46,17 @@ function buildPinIcon(selected = false) {
   });
 }
 
-function MapBounds({ points }: { points: FlexMapPoint[] }) {
+function MapBounds({
+  points,
+  shouldAutoFit = true,
+}: {
+  points: FlexMapPoint[];
+  shouldAutoFit?: boolean;
+}) {
   const map = useMap();
 
   useEffect(() => {
-    if (points.length === 0) {
+    if (!shouldAutoFit || points.length === 0) {
       return;
     }
 
@@ -71,7 +77,7 @@ function MapBounds({ points }: { points: FlexMapPoint[] }) {
       padding: [40, 40],
       maxZoom: 15,
     });
-  }, [map, points]);
+  }, [map, points, shouldAutoFit]);
 
   return null;
 }
@@ -79,9 +85,11 @@ function MapBounds({ points }: { points: FlexMapPoint[] }) {
 export function FlexTodayMap({
   points,
   onSelect,
+  shouldAutoFit = true,
 }: {
   points: FlexMapPoint[];
   onSelect?: (id: string) => void;
+  shouldAutoFit?: boolean;
 }) {
   const fallbackCenter: [number, number] = [-33.4489, -70.6693];
 
@@ -96,7 +104,7 @@ export function FlexTodayMap({
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
-      <MapBounds points={points} />
+      {points.length > 0 ? <MapBounds points={points} shouldAutoFit={shouldAutoFit} /> : null}
 
       {points.map((point) => (
         <Marker

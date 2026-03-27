@@ -2,7 +2,19 @@ import Link from 'next/link';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ConnectedAccount, OrderRow } from '../types/eselink';
 import { useState, type ReactNode } from 'react';
+import {
+  AlertTriangle,
+  Ban,
+  CheckCircle2,
+  Clock3,
+  MessageSquare,
+  Printer,
+  RefreshCcw,
+  Truck,
+} from 'lucide-react';
+import { CopyButton } from '../components/copy-button';
 import { PlatformBadge, PlatformLogo } from '../components/platform-brand';
+import { formatOrderIdentifier, formatOrderReference } from '../lib/order-reference';
 
 function formatMoney(value: number, currency = 'CLP') {
   return new Intl.NumberFormat('es-CL', {
@@ -18,6 +30,18 @@ function normalizeImageUrl(url?: string | null) {
   }
 
   return url.startsWith('http://') ? `https://${url.slice('http://'.length)}` : url;
+}
+
+function CopyIdentifierButton({
+  value,
+  label,
+}: {
+  value: string;
+  label: string;
+}) {
+  return (
+    <CopyButton value={value} label={label} />
+  );
 }
 
 function ProductThumb({
@@ -55,8 +79,10 @@ function ProductThumb({
 export function StatusBadge({
   children,
   tone = 'neutral',
+  icon,
 }: {
   children: ReactNode;
+  icon?: ReactNode;
   tone?:
     | 'neutral'
     | 'positive'
@@ -80,8 +106,9 @@ export function StatusBadge({
 
   return (
     <span
-      className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold capitalize tracking-[0.01em] ${tones[tone]}`}
+      className={`inline-flex whitespace-nowrap items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold capitalize tracking-[0.01em] ${tones[tone]}`}
     >
+      {icon ? <span className="shrink-0">{icon}</span> : null}
       {children}
     </span>
   );
@@ -113,22 +140,6 @@ function getOrderStatusTone(status: string): 'positive' | 'info' | 'warning' | '
   }
 
   return 'warning';
-}
-
-function formatOrderIdentifier(orderNumber: string) {
-  return orderNumber.replace(/^ML-/, '');
-}
-
-function formatGroupIdentifier(orderNumber?: string | null, packId?: string | null) {
-  if (packId) {
-    return packId;
-  }
-
-  if (orderNumber) {
-    return formatOrderIdentifier(orderNumber);
-  }
-
-  return 'Venta';
 }
 
 function formatPurchaseTime(value?: string | null) {
@@ -211,6 +222,31 @@ function isRowFinalized(row: OrderTableRow) {
   );
 }
 
+function getCancellableOrderIds(row: OrderTableRow) {
+  const orders = row.individualOrders?.length
+    ? row.individualOrders
+    : [
+        {
+          id: row.id,
+          shippingStage: row.shippingStage ?? null,
+          shippingStatus: row.shippingStatus ?? null,
+          status: row.status,
+        },
+      ];
+
+  return orders
+    .filter((order) => {
+      const stage = order.shippingStage?.toLowerCase() ?? '';
+      const shippingStatus = order.shippingStatus?.toLowerCase() ?? '';
+      const status = order.status?.toLowerCase() ?? '';
+
+      return !['delivered', 'cancelled', 'rescheduled'].includes(stage) &&
+        !['delivered', 'cancelled'].includes(shippingStatus) &&
+        !['delivered', 'canceled', 'cancelled'].includes(status);
+    })
+    .map((order) => order.id);
+}
+
 function hasPrintedLabel(row: OrderTableRow) {
   if (row.shippingSubstatus?.toLowerCase() === 'printed') {
     return true;
@@ -239,7 +275,7 @@ function Chevron({
         className="h-4 w-4"
       >
         <path
-          d="M5 12.5L10 7.5L15 12.5"
+          d="M5 7.5L10 12.5L15 7.5"
           stroke="currentColor"
           strokeWidth="1.8"
           strokeLinecap="round"
@@ -401,6 +437,51 @@ export function getShippingStageTone(
   return 'neutral';
 }
 
+export function getShippingStageIcon(
+  stage?:
+    | 'ready_to_print'
+    | 'ready_to_ship'
+    | 'shipped'
+    | 'delivered'
+    | 'cancelled'
+    | 'rescheduled'
+    | null,
+  options?: {
+    overdue?: boolean;
+    deliveredLate?: boolean;
+  },
+) {
+  if (options?.overdue || options?.deliveredLate) {
+    return <AlertTriangle className="h-3.5 w-3.5" />;
+  }
+
+  if (stage === 'ready_to_print') {
+    return <Printer className="h-3.5 w-3.5" />;
+  }
+
+  if (stage === 'ready_to_ship') {
+    return <Clock3 className="h-3.5 w-3.5" />;
+  }
+
+  if (stage === 'shipped') {
+    return <Truck className="h-3.5 w-3.5" />;
+  }
+
+  if (stage === 'delivered') {
+    return <CheckCircle2 className="h-3.5 w-3.5" />;
+  }
+
+  if (stage === 'cancelled') {
+    return <Ban className="h-3.5 w-3.5" />;
+  }
+
+  if (stage === 'rescheduled') {
+    return <RefreshCcw className="h-3.5 w-3.5" />;
+  }
+
+  return null;
+}
+
 function OrderLineCard({
   order,
 }: {
@@ -506,32 +587,42 @@ function OrderGroupCell({
   onOpenSummary: (row: OrderTableRow) => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
-  const primaryIdentifier = formatGroupIdentifier(row.orderNumber, row.packId);
+  const primaryIdentifier = formatOrderReference(row.orderNumber, row.packId);
   const orders = row.individualOrders ?? [];
   const hasMultipleOrders = orders.length > 1;
-  const identifier = row.packId ? row.packId : formatOrderIdentifier(row.orderNumber);
+  const identifier = formatOrderReference(row.orderNumber, row.packId);
 
   if (!hasMultipleOrders) {
     return (
       <div className="min-w-[320px]">
-        <button
-          type="button"
-          onClick={() => onOpenSummary(row)}
-          className="grid w-full grid-cols-[52px_minmax(0,1fr)] items-start gap-x-3 gap-y-1 text-left transition hover:opacity-95"
-        >
+        <div className="grid w-full grid-cols-[52px_minmax(0,1fr)] items-start gap-x-3 gap-y-1">
           <div className="row-span-3 self-stretch">
-            <ProductThumb
-              url={row.productImageUrl}
-              alt={row.productTitle ?? 'Producto de la orden'}
-              sizeClassName="h-full min-h-[64px] w-[52px]"
-            />
+            <button
+              type="button"
+              onClick={() => onOpenSummary(row)}
+              className="block h-full w-full text-left transition hover:opacity-95"
+            >
+              <ProductThumb
+                url={row.productImageUrl}
+                alt={row.productTitle ?? 'Producto de la orden'}
+                sizeClassName="h-full min-h-[64px] w-[52px]"
+              />
+            </button>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="inline-flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onOpenSummary(row)}
+              className="inline-flex min-w-0 items-center gap-1 text-left transition hover:opacity-95"
+            >
               <PlatformLogo platform={row.platform} className="h-4 w-4 shrink-0" />
-              <p className="truncate text-sm font-semibold text-night">
-                {identifier}
-              </p>
+              <p className="truncate text-sm font-semibold text-night">{identifier}</p>
+            </button>
+            <div className="inline-flex shrink-0">
+              <CopyIdentifierButton
+                value={row.packId ?? row.orderNumber}
+                label={row.packId ? 'Copiar pack' : 'Copiar orden'}
+              />
             </div>
             {formatPurchaseTime(row.placedAt ?? row.createdAt) ? (
               <span className="text-xs font-medium text-ink/45">
@@ -547,13 +638,15 @@ function OrderGroupCell({
           ) : (
             <div />
           )}
-          <p
-            className="max-w-[290px] min-w-0 truncate whitespace-nowrap text-sm text-ink/80"
+          <button
+            type="button"
+            onClick={() => onOpenSummary(row)}
+            className="max-w-[290px] min-w-0 truncate whitespace-nowrap text-left text-sm text-ink/80 transition hover:opacity-95"
             title={row.productTitle ?? 'Producto sin título'}
           >
             {row.productTitle ?? 'Producto sin título'}
-          </p>
-        </button>
+          </button>
+        </div>
       </div>
     );
   }
@@ -575,12 +668,20 @@ function OrderGroupCell({
               <Chevron open={false} />
             </div>
           </button>
-          <button
-            type="button"
-            onClick={() => onOpenSummary(row)}
-            className="flex min-w-0 flex-1 items-start gap-3 text-left transition hover:opacity-95"
-          >
-              <div className="flex -space-x-3 pt-0.5">
+          <div className="flex min-w-0 flex-1 items-start gap-3">
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => onOpenSummary(row)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onOpenSummary(row);
+                }
+              }}
+              className="flex min-w-0 flex-1 items-start gap-3 text-left transition hover:opacity-95 focus:outline-none"
+            >
+              <div className="flex -space-x-2.5 pt-0.5">
                 {orders.slice(-3).map((order, index) => (
                   <div
                     key={order.externalOrderId}
@@ -600,16 +701,26 @@ function OrderGroupCell({
                 ) : null}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="inline-flex min-w-0 items-center gap-2">
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex shrink-0 items-center gap-1">
                     <PlatformLogo platform={row.platform} className="h-4 w-4 shrink-0" />
-                    <p className="truncate text-sm font-semibold text-night">{primaryIdentifier}</p>
+                    <p className="whitespace-nowrap text-sm font-semibold text-night">
+                      {primaryIdentifier}
+                    </p>
+                  </div>
+                  <div className="inline-flex shrink-0">
+                    <CopyIdentifierButton
+                      value={row.packId ?? row.orderNumber}
+                      label={row.packId ? 'Copiar pack' : 'Copiar orden'}
+                    />
                   </div>
                   {formatPurchaseTime(row.placedAt ?? row.createdAt) ? (
-                    <span className="text-xs font-medium text-ink/45">
+                    <span className="shrink-0 text-xs font-medium text-ink/45">
                       {formatPurchaseTime(row.placedAt ?? row.createdAt)}
                     </span>
                   ) : null}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
                   {row.hasMessages ? (
                     <MessageIndicator unreadCount={row.unreadMessagesCount ?? 0} compact />
                   ) : null}
@@ -621,7 +732,8 @@ function OrderGroupCell({
                   <p className="text-xs text-ink/45">Venta con varias órdenes</p>
                 </div>
               </div>
-          </button>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
@@ -639,14 +751,29 @@ function OrderGroupCell({
                 Contraer
               </button>
               <div className="min-w-0">
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onOpenSummary(row)}
-                  className="flex flex-wrap items-center gap-2 text-left transition hover:opacity-95"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onOpenSummary(row);
+                    }
+                  }}
+                  className="flex flex-wrap items-center gap-2 text-left transition hover:opacity-95 focus:outline-none"
                 >
-                  <div className="inline-flex min-w-0 items-center gap-2">
+                  <div className="inline-flex min-w-0 items-center gap-1">
                     <PlatformLogo platform={row.platform} className="h-4 w-4 shrink-0" />
-                    <p className="truncate text-sm font-semibold text-night">{primaryIdentifier}</p>
+                    <p className="whitespace-nowrap text-sm font-semibold text-night">
+                      {primaryIdentifier}
+                    </p>
+                  </div>
+                  <div className="inline-flex shrink-0">
+                    <CopyIdentifierButton
+                      value={row.packId ?? row.orderNumber}
+                      label={row.packId ? 'Copiar pack' : 'Copiar orden'}
+                    />
                   </div>
                   {formatPurchaseTime(row.placedAt ?? row.createdAt) ? (
                     <span className="text-xs font-medium text-ink/45">
@@ -656,7 +783,7 @@ function OrderGroupCell({
                   {row.hasMessages ? (
                     <MessageIndicator unreadCount={row.unreadMessagesCount ?? 0} compact />
                   ) : null}
-                </button>
+                </div>
                 {row.account ? (
                   <p className="mt-1 text-xs text-ink/45">{row.account}</p>
                 ) : null}
@@ -679,33 +806,33 @@ function OrderGroupCell({
 function OrderActionsMenu({
   row,
   onPrintLabel,
+  onOpenMessages,
+  onCancelOrder,
   isPrinting,
+  isCancelling,
   isOpen,
   onToggle,
 }: {
   row: OrderTableRow;
   onPrintLabel: (row: OrderTableRow) => void | Promise<void>;
+  onOpenMessages: (row: OrderTableRow) => void;
+  onCancelOrder: (row: OrderTableRow) => void | Promise<void>;
   isPrinting: boolean;
+  isCancelling: boolean;
   isOpen: boolean;
   onToggle: () => void;
 }) {
   const printedLabel = hasPrintedLabel(row);
   const inTransit = isRowInTransit(row);
   const finalized = isRowFinalized(row);
+  const cancellableOrderIds = getCancellableOrderIds(row);
+  const hasCancellableOrders = cancellableOrderIds.length > 0;
   const isPrintBlocked = inTransit || finalized;
   const printActionLabel = printedLabel ? 'Reimprimir etiqueta' : 'Imprimir etiqueta';
   const printActionHint = isPrinting ? '...' : isPrintBlocked ? 'Bloq.' : 'PDF';
 
-  async function copyIdentifier() {
-    try {
-      await navigator.clipboard.writeText(row.packId ?? row.orderNumber);
-    } catch {
-      // Keep the row action usable even if clipboard permissions are unavailable.
-    }
-  }
-
   return (
-    <div className="relative">
+    <div className="relative" data-order-actions-menu="true">
       <summary
         aria-label="Abrir acciones"
         onClick={onToggle}
@@ -738,17 +865,40 @@ function OrderActionsMenu({
             }
             className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-ink/80 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <span>{printActionLabel}</span>
+            <span className="inline-flex items-center gap-2">
+              <Printer className="h-4 w-4 shrink-0" />
+              <span>{printActionLabel}</span>
+            </span>
             <span className="text-xs text-ink/45">{printActionHint}</span>
           </button>
           <button
             type="button"
-            onClick={() => void copyIdentifier()}
+            onClick={() => onOpenMessages(row)}
             className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-ink/80 transition hover:bg-slate-50"
           >
-            <span>{row.packId ? 'Copiar pack' : 'Copiar orden'}</span>
-            <span className="text-xs text-ink/45">
-              {row.packId ?? formatOrderIdentifier(row.orderNumber)}
+            <span className="inline-flex items-center gap-2">
+              <MessageSquare className="h-4 w-4 shrink-0" />
+              <span>{row.hasMessages ? 'Ver mensaje' : 'Enviar mensaje'}</span>
+            </span>
+            <span className="text-xs text-ink/45">{row.hasMessages ? 'Bandeja' : 'Ir'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void onCancelOrder(row)}
+            disabled={isCancelling || !hasCancellableOrders}
+            title={
+              hasCancellableOrders
+                ? undefined
+                : 'Todas las órdenes de esta venta ya están finalizadas y no se pueden cancelar.'
+            }
+            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <span className="inline-flex items-center gap-2">
+              <Ban className="h-4 w-4 shrink-0" />
+              <span>Cancelar orden</span>
+            </span>
+            <span className="text-xs text-rose-500">
+              {isCancelling ? '...' : hasCancellableOrders ? `${cancellableOrderIds.length}` : 'Bloq.'}
             </span>
           </button>
         </div>
@@ -764,6 +914,7 @@ export type OrderTableRow = OrderRow & {
   productImageUrl?: string | null;
   packId?: string | null;
   profitAmount?: number | null;
+  estimatedNetBeforeCost?: number | null;
   hasMessages?: boolean;
   unreadMessagesCount?: number;
   lastMessageText?: string | null;
@@ -839,7 +990,10 @@ export const accountColumns: ColumnDef<ConnectedAccount>[] = [
 
 export function createOrderColumns({
   onPrintLabel,
+  onOpenMessages,
+  onCancelOrder,
   printingOrderId,
+  cancellingOrderId,
   onOpenSummary,
   selectedRowIds,
   onToggleRowSelection,
@@ -851,7 +1005,10 @@ export function createOrderColumns({
   onToggleActionMenu,
 }: {
   onPrintLabel: (row: OrderTableRow) => void | Promise<void>;
+  onOpenMessages: (row: OrderTableRow) => void;
+  onCancelOrder: (row: OrderTableRow) => void | Promise<void>;
   printingOrderId?: string | null;
+  cancellingOrderId?: string | null;
   onOpenSummary: (row: OrderTableRow) => void;
   selectedRowIds: Set<string>;
   onToggleRowSelection: (rowId: string) => void;
@@ -909,7 +1066,7 @@ export function createOrderColumns({
     },
     {
       accessorKey: 'status',
-      header: 'Estado',
+      header: () => <div className="min-w-[164px] text-center">Estado</div>,
       cell: ({ row }) => {
         const shippingStage =
           row.original.shippingStage ?? row.original.individualOrders?.[0]?.shippingStage ?? null;
@@ -923,10 +1080,20 @@ export function createOrderColumns({
           : isDeliveredLateRow(row.original)
             ? 'accent'
             : getShippingStageTone(shippingStage);
+        const shippingStageIcon = getShippingStageIcon(shippingStage, {
+          overdue: row.original.shippingOverdue,
+          deliveredLate: isDeliveredLateRow(row.original),
+        });
 
         return (
-          <div className="flex flex-col items-center gap-2 text-center">
-            {shippingStageLabel ? <StatusBadge tone={shippingStageTone}>{shippingStageLabel}</StatusBadge> : <span className="text-xs text-ink/40">Sin etapa</span>}
+          <div className="flex min-w-[164px] justify-center text-center">
+            {shippingStageLabel ? (
+              <StatusBadge tone={shippingStageTone} icon={shippingStageIcon}>
+                {shippingStageLabel}
+              </StatusBadge>
+            ) : (
+              <span className="text-xs text-ink/40">Sin etapa</span>
+            )}
           </div>
         );
       },
@@ -1028,7 +1195,10 @@ export function createOrderColumns({
           <OrderActionsMenu
             row={row.original}
             onPrintLabel={onPrintLabel}
+            onOpenMessages={onOpenMessages}
+            onCancelOrder={onCancelOrder}
             isPrinting={printingOrderId === row.original.id}
+            isCancelling={cancellingOrderId === row.original.id}
             isOpen={openActionMenuId === row.original.id}
             onToggle={() => onToggleActionMenu(row.original.id)}
           />

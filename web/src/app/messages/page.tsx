@@ -1,5 +1,6 @@
 'use client';
 
+import { useSearchParams } from 'next/navigation';
 import type { PlatformCode } from '../../types/eselink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -7,6 +8,8 @@ import { inputClassName } from '../../components/form-field';
 import { PlatformLogo } from '../../components/platform-brand';
 import { PageShell } from '../../components/page-shell';
 import { fetchApi, postApi } from '../../lib/api';
+import { formatOrderReference } from '../../lib/order-reference';
+import { getShippingStageIcon, getShippingStageTone } from '../../lib/table-columns';
 
 type MessageConversation = {
   id: string;
@@ -127,23 +130,91 @@ function formatShippingStage(stage?: string | null) {
   return 'Sin etapa';
 }
 
+function formatConversationSubstatus(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  return value
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function getBlockedConversationReason(substatus?: string | null) {
+  const normalized = substatus?.toLowerCase() ?? '';
+
+  if (!normalized) {
+    return 'Mercado Libre bloqueó esta conversación temporalmente, así que no puedes responder desde aquí.';
+  }
+
+  if (normalized.includes('buyer') && normalized.includes('block')) {
+    return 'El comprador bloqueó esta conversación, por lo que ya no admite respuestas desde Eselink.';
+  }
+
+  if (normalized.includes('expired') || normalized.includes('window')) {
+    return 'La ventana disponible para responder ya cerró en Mercado Libre.';
+  }
+
+  if (normalized.includes('closed') || normalized.includes('finalized')) {
+    return 'La conversación ya fue cerrada en Mercado Libre y quedó solo en modo lectura.';
+  }
+
+  return `Esta conversación está bloqueada por Mercado Libre: ${formatConversationSubstatus(
+    substatus,
+  )}.`;
+}
+
+function getMessageShippingStageTone(
+  stage?: string | null,
+): 'neutral' | 'warning' | 'info' | 'successSoft' | 'danger' | 'orange' {
+  const tone = getShippingStageTone(
+    (stage as
+      | 'ready_to_print'
+      | 'ready_to_ship'
+      | 'shipped'
+      | 'delivered'
+      | 'cancelled'
+      | 'rescheduled'
+      | null
+      | undefined) ?? null,
+  );
+
+  if (
+    tone === 'warning' ||
+    tone === 'info' ||
+    tone === 'successSoft' ||
+    tone === 'danger' ||
+    tone === 'orange'
+  ) {
+    return tone;
+  }
+
+  return 'neutral';
+}
+
 function MetaChip({
   children,
   tone = 'neutral',
+  icon,
 }: {
   children: ReactNode;
-  tone?: 'neutral' | 'warning' | 'info';
+  tone?: 'neutral' | 'warning' | 'info' | 'successSoft' | 'danger' | 'orange';
+  icon?: ReactNode;
 }) {
   const styles = {
     neutral: 'border-slate-200 bg-white text-slate-700',
     warning: 'border-amber-200 bg-amber-50 text-amber-800',
     info: 'border-blue-200 bg-blue-50 text-blue-700',
+    successSoft: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    danger: 'border-rose-200 bg-rose-50 text-rose-800',
+    orange: 'border-orange-200 bg-orange-50 text-orange-800',
   } as const;
 
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${styles[tone]}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${styles[tone]}`}
     >
+      {icon ? <span className="shrink-0">{icon}</span> : null}
       {children}
     </span>
   );
@@ -153,6 +224,8 @@ const MESSAGES_CACHE_KEY = 'messages:conversation-cache';
 const MESSAGES_READ_OVERRIDES_KEY = 'messages:read-overrides';
 
 export default function MessagesPage() {
+  const searchParams = useSearchParams();
+  const requestedConversationId = searchParams.get('conversationId');
   const queryClient = useQueryClient();
   const conversationRefs = useRef(new Map<string, HTMLButtonElement>());
   const previousConversationRects = useRef(new Map<string, DOMRect>());
@@ -333,6 +406,20 @@ export default function MessagesPage() {
     }
   }, [conversations, selectedConversationId]);
 
+  useEffect(() => {
+    if (!requestedConversationId || conversations.length === 0) {
+      return;
+    }
+
+    const matchedConversation = conversations.find(
+      (conversation) => conversation.id === requestedConversationId,
+    );
+
+    if (matchedConversation && selectedConversationId !== matchedConversation.id) {
+      setSelectedConversationId(matchedConversation.id);
+    }
+  }, [conversations, requestedConversationId, selectedConversationId]);
+
   const selectedConversation =
     conversations.find((conversation) => conversation.id === selectedConversationId) ?? null;
 
@@ -353,8 +440,40 @@ export default function MessagesPage() {
   });
 
   useEffect(() => {
+    if (!selectedConversationId || !threadQuery.data) {
+      return;
+    }
+
+    setConversationCache((current) => {
+      const existing = current[selectedConversationId];
+      if (!existing) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [selectedConversationId]: {
+          ...existing,
+          productTitle: threadQuery.data.productTitle ?? existing.productTitle ?? null,
+          productImageUrl: threadQuery.data.productImageUrl ?? existing.productImageUrl ?? null,
+          customerName: threadQuery.data.customerName ?? existing.customerName ?? null,
+          orderNumber: threadQuery.data.orderNumber ?? existing.orderNumber ?? null,
+          shippingStage: threadQuery.data.shippingStage ?? existing.shippingStage ?? null,
+        },
+      };
+    });
+  }, [selectedConversationId, threadQuery.data]);
+
+  useEffect(() => {
     setDraft('');
   }, [selectedConversationId]);
+
+  const threadConversationStatus = threadQuery.data?.conversationStatus ?? null;
+  const threadConversationSubstatus = threadQuery.data?.conversationSubstatus ?? null;
+  const isThreadBlocked = threadConversationStatus === 'blocked';
+  const blockedConversationReason = isThreadBlocked
+    ? getBlockedConversationReason(threadConversationSubstatus)
+    : null;
 
   const groupedAccounts = useMemo(() => {
     const grouped = conversations.reduce<Map<string, MessageConversation[]>>((map, item) => {
@@ -443,10 +562,18 @@ export default function MessagesPage() {
       setDraft('');
       setFeedback('Mensaje enviado correctamente.');
       if (selectedConversation) {
+        const markedAt = new Date().toISOString();
+        setReadOverrides((current) => ({
+          ...current,
+          [selectedConversation.id]: markedAt,
+        }));
+      }
+      if (selectedConversation) {
         setConversationCache((current) => ({
           ...current,
           [selectedConversation.id]: {
             ...(current[selectedConversation.id] ?? selectedConversation),
+            unreadCount: 0,
             lastMessage: {
               ...(current[selectedConversation.id]?.lastMessage ?? selectedConversation.lastMessage ?? {}),
               text: draft.trim(),
@@ -529,6 +656,11 @@ export default function MessagesPage() {
     event.preventDefault();
 
     if (!selectedConversation || !threadQuery.data) {
+      return;
+    }
+
+    if (threadQuery.data.conversationStatus === 'blocked') {
+      setFeedback(getBlockedConversationReason(threadQuery.data.conversationSubstatus));
       return;
     }
 
@@ -748,7 +880,7 @@ export default function MessagesPage() {
                           }}
                           className={`w-full rounded-[1.3rem] border px-4 py-3 text-left transition ${
                             active
-                              ? 'border-night bg-night text-white shadow-[0_18px_40px_-22px_rgba(15,23,42,0.65)] ring-2 ring-night/15'
+                              ? 'border-slate-800 bg-[linear-gradient(135deg,#162235_0%,#1f334d_52%,#2b4863_100%)] text-white shadow-[0_18px_40px_-22px_rgba(22,34,53,0.5)] ring-2 ring-slate-300/40'
                               : 'border-black/5 bg-white/80 text-night hover:border-slate-200'
                           }`}
                         >
@@ -759,14 +891,14 @@ export default function MessagesPage() {
                                   src={normalizeImageUrl(conversation.productImageUrl)!}
                                   alt={conversation.productTitle ?? 'Producto'}
                                   className={`h-14 w-14 shrink-0 rounded-2xl object-cover ring-1 ${
-                                    active ? 'ring-white/20' : 'ring-slate-200'
+                                    active ? 'ring-white/30' : 'ring-slate-200'
                                   }`}
                                 />
                               ) : (
                                 <div
                                   className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-[10px] font-semibold uppercase tracking-[0.14em] ${
                                     active
-                                      ? 'bg-white/10 text-white/70 ring-1 ring-white/12'
+                                      ? 'bg-white/12 text-white/75 ring-1 ring-white/18'
                                       : 'bg-slate-100 text-ink/40 ring-1 ring-slate-200'
                                   }`}
                                 >
@@ -782,16 +914,16 @@ export default function MessagesPage() {
                                       'Conversación'}
                                   </p>
                                   {active ? (
-                                    <span className="rounded-full border border-white/18 bg-white/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/88">
+                                    <span className="rounded-full border border-white/20 bg-white/14 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/90">
                                       Abierta
                                     </span>
                                   ) : null}
                                 </div>
                                 <p className={`mt-1 truncate text-xs ${active ? 'text-white/70' : 'text-ink/50'}`}>
                                   {conversation.orderNumber
-                                    ? `Orden ${conversation.orderNumber}`
+                                    ? formatOrderReference(conversation.orderNumber, conversation.packId)
                                     : conversation.packId
-                                      ? `Pack ${conversation.packId}`
+                                      ? formatOrderReference(null, conversation.packId)
                                       : conversation.resource}
                                 </p>
                               </div>
@@ -806,7 +938,7 @@ export default function MessagesPage() {
                               {getEffectiveUnreadCount(conversation)}
                             </span>
                           </div>
-                          <p className={`mt-3 line-clamp-2 text-sm leading-6 ${active ? 'text-white/82' : 'text-ink/65'}`}>
+                          <p className={`mt-3 line-clamp-2 text-sm leading-6 ${active ? 'text-white/84' : 'text-ink/65'}`}>
                             {truncate(conversation.lastMessage?.text, 90)}
                           </p>
                           <div className={`mt-3 flex items-center justify-between text-[11px] ${active ? 'text-white/65' : 'text-ink/45'}`}>
@@ -848,34 +980,33 @@ export default function MessagesPage() {
                             Conversación activa
                           </p>
                         </div>
-                        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-night">
-                          {threadQuery.data.customerName ??
-                            threadQuery.data.productTitle ??
-                            threadQuery.data.packId ??
-                            'Hilo de mensajes'}
-                        </h2>
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <MetaChip>
+                        <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                          <h2 className="text-2xl font-semibold tracking-tight text-night">
+                            {threadQuery.data.customerName ??
+                              threadQuery.data.productTitle ??
+                              threadQuery.data.packId ??
+                              'Hilo de mensajes'}
+                          </h2>
+                          <p className="text-sm font-medium text-ink/45">
                             {threadQuery.data.orderNumber
-                              ? `Orden ${threadQuery.data.orderNumber}`
+                              ? formatOrderReference(
+                                  threadQuery.data.orderNumber,
+                                  threadQuery.data.packId,
+                                )
                               : threadQuery.data.packId
-                                ? `Pack ${threadQuery.data.packId}`
+                                ? formatOrderReference(null, threadQuery.data.packId)
                                 : threadQuery.data.resource}
-                          </MetaChip>
-                          <MetaChip tone="info">
-                            {threadQuery.data.customerName ?? 'Cliente sin nombre'}
-                          </MetaChip>
-                          <MetaChip tone="warning">
-                            {formatShippingStage(threadQuery.data.shippingStage)}
-                          </MetaChip>
-                          {threadQuery.data.conversationStatus ? (
-                            <MetaChip>
-                              {threadQuery.data.conversationStatus}
-                            </MetaChip>
-                          ) : null}
+                          </p>
+                        </div>
+                        {threadQuery.data.productTitle ? (
+                          <p className="mt-2 text-sm font-medium text-ink/55">
+                            {threadQuery.data.productTitle}
+                          </p>
+                        ) : null}
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
                           {threadQuery.data.conversationSubstatus ? (
                             <MetaChip>
-                              {threadQuery.data.conversationSubstatus}
+                              {formatConversationSubstatus(threadQuery.data.conversationSubstatus)}
                             </MetaChip>
                           ) : null}
                         </div>
@@ -883,20 +1014,23 @@ export default function MessagesPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <MetaChip>{threadQuery.data.totalMessages} mensajes</MetaChip>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        markReadMutation.mutate({
-                          accountId: selectedConversation.accountId,
-                          resource: selectedConversation.resource,
-                        })
-                      }
-                      disabled={markReadMutation.isPending}
-                      className="rounded-full border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    <MetaChip
+                      tone={getMessageShippingStageTone(threadQuery.data.shippingStage)}
+                      icon={getShippingStageIcon(
+                        (threadQuery.data.shippingStage as
+                          | 'ready_to_print'
+                          | 'ready_to_ship'
+                          | 'shipped'
+                          | 'delivered'
+                          | 'cancelled'
+                          | 'rescheduled'
+                          | null
+                          | undefined) ?? null,
+                      )}
                     >
-                      Marcar como leído
-                    </button>
+                      {formatShippingStage(threadQuery.data.shippingStage)}
+                    </MetaChip>
+                    <MetaChip>{threadQuery.data.totalMessages} mensajes</MetaChip>
                   </div>
                 </div>
               </div>
@@ -935,24 +1069,45 @@ export default function MessagesPage() {
               </div>
 
               <form onSubmit={handleReplySubmit} className="border-t border-black/5 bg-white/70 px-6 py-4">
-                <div className="rounded-[1.6rem] border border-black/10 bg-white p-3 shadow-sm">
-                  <textarea
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                    placeholder="Escribe una respuesta para el comprador..."
-                    className="min-h-[92px] w-full resize-none bg-transparent px-2 py-2 text-sm text-night outline-none placeholder:text-ink/35"
-                  />
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-black/5 px-2 pt-3">
-                    <p className="text-xs text-ink/45">Hasta 350 caracteres por mensaje en Mercado Libre.</p>
-                    <button
-                      type="submit"
-                      disabled={replyMutation.isPending || draft.trim().length === 0}
-                      className="rounded-full border border-night bg-night px-5 py-2.5 text-xs font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {replyMutation.isPending ? 'Enviando...' : 'Responder'}
-                    </button>
+                {isThreadBlocked ? (
+                  <div className="rounded-[1.6rem] border border-rose-200 bg-[linear-gradient(180deg,rgba(255,241,242,0.96),rgba(255,255,255,0.98))] p-4 shadow-sm">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700">
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4.5 w-4.5">
+                          <path
+                            d="M10 2.5A4.5 4.5 0 0 0 5.5 7v1H5A1.5 1.5 0 0 0 3.5 9.5v5A1.5 1.5 0 0 0 5 16h10a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 15 8h-.5V7A4.5 4.5 0 0 0 10 2.5ZM7 8V7a3 3 0 1 1 6 0v1H7Z"
+                            fill="currentColor"
+                          />
+                        </svg>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-rose-900">Respuesta bloqueada</p>
+                        <p className="mt-1 text-sm leading-6 text-rose-800/90">
+                          {blockedConversationReason}
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="rounded-[1.6rem] border border-black/10 bg-white p-3 shadow-sm">
+                    <textarea
+                      value={draft}
+                      onChange={(event) => setDraft(event.target.value)}
+                      placeholder="Escribe una respuesta para el comprador..."
+                      className="min-h-[92px] w-full resize-none bg-transparent px-2 py-2 text-sm text-night outline-none placeholder:text-ink/35"
+                    />
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-black/5 px-2 pt-3">
+                      <p className="text-xs text-ink/45">Hasta 350 caracteres por mensaje en Mercado Libre.</p>
+                      <button
+                        type="submit"
+                        disabled={replyMutation.isPending || draft.trim().length === 0}
+                        className="rounded-full border border-night bg-night px-5 py-2.5 text-xs font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {replyMutation.isPending ? 'Enviando...' : 'Responder'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </form>
             </div>
           ) : (

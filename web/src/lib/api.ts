@@ -72,7 +72,6 @@ export async function requestApi<T>(
 ): Promise<T> {
   const session = getStoredSession();
   const response = await fetch(`${API_BASE_URL}/api${path}`, {
-    cache: 'no-store',
     ...init,
     headers: {
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),

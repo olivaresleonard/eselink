@@ -1,9 +1,12 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FormEvent, startTransition, useEffect, useMemo, useState } from 'react';
+import { AlertCircle, Building2, ChevronDown, Filter, LoaderCircle, MessageSquare, Printer, RefreshCcw } from 'lucide-react';
+import { FormEvent, startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import type { PlatformCode } from '../../types/eselink';
+import { CopyButton } from '../../components/copy-button';
 import { DataTable } from '../../components/data-table';
+import { FilterChip } from '../../components/filter-chip';
 import {
   FieldGroup,
   FormActions,
@@ -17,8 +20,15 @@ import { QueryState } from '../../components/query-state';
 import { ApiError, fetchApi, formatCurrency, postApi } from '../../lib/api';
 import { formatPlatformLabel } from '../../lib/channel-labels';
 import {
+  fetchOrdersDataset,
+  getLocalDateKey as getOrdersDateKey,
+  getOrdersDatasetQueryKey,
+  type OrdersQueryData,
+} from '../../lib/orders-query';
+import {
   createOrderColumns,
   formatShippingStage,
+  getShippingStageIcon,
   getShippingStageTone,
   StatusBadge,
   type OrderTableRow,
@@ -28,6 +38,7 @@ import type { OrderRow } from '../../types/eselink';
 type ApiOrderRow = OrderRow & {
   totalAmount: number | string;
   profitAmount?: number | string | null;
+  estimatedNetBeforeCost?: number | string | null;
   account?: string;
   placedAt?: string | null;
   importedAt?: string | null;
@@ -55,20 +66,15 @@ type FinalizedStage = Exclude<FinalizedStageFilter, 'all'>;
 type UpcomingStageFilter = 'all' | 'ready_to_print' | 'ready_to_ship';
 type InTransitStageFilter = 'all' | 'shipped' | 'overdue' | 'rescheduled';
 type OrderDetailTab = 'products' | 'finance' | 'activity';
-
-type OrdersResponse = {
-  data: ApiOrderRow[];
-  meta?: {
-    total?: number;
-    pendingCount?: number;
-    purchaseCount?: number;
-  };
-};
+type ShippingTypeFilter = 'all' | 'flex' | 'mercado_envios';
 
 type OrderMessageConversation = {
+  id?: string;
+  resource?: string | null;
   packId?: string | null;
   orderId?: string | null;
   unreadCount: number;
+  accountId?: string;
   lastMessage?: {
     text?: string | null;
     createdAt?: string | null;
@@ -97,16 +103,20 @@ type ApiAccount = {
   } | null;
 };
 
-type OrdersQueryData = {
-  rows: ApiOrderRow[];
-  meta: NonNullable<OrdersResponse['meta']>;
-};
-
 type OrderDetailResponse = {
   order: {
     id: string;
     orderNumber: string;
     status: string;
+    shippingStatus?: string | null;
+    shippingStage?:
+      | 'ready_to_print'
+      | 'ready_to_ship'
+      | 'shipped'
+      | 'delivered'
+      | 'cancelled'
+      | 'rescheduled'
+      | null;
     customerName?: string | null;
     customerDisplayName?: string | null;
     customerNickname?: string | null;
@@ -170,6 +180,14 @@ type PlatformOption = {
   value: PlatformCode;
   label: string;
 };
+
+const CANCEL_REASON_OPTIONS = [
+  'Me arrepentí de la venta',
+  'No tengo el producto disponible',
+  'El comprador se arrepintió',
+  'Tuve problemas con el envío',
+  'Tuve problemas con el correo',
+] as const;
 
 function getLocalDateKey(date = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -243,6 +261,25 @@ function formatOrderShippingTypeLabel(
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function selectorClassName() {
+  return 'inline-flex h-[42px] w-full items-center justify-between gap-3 rounded-xl border border-black/10 bg-white px-4 text-sm text-ink transition hover:border-slate-300 disabled:cursor-default disabled:opacity-60';
+}
+
+function matchesShippingTypeFilter(
+  row: Pick<OrderTableRow, 'shippingType' | 'individualOrders'>,
+  shippingTypeFilter: ShippingTypeFilter,
+) {
+  if (shippingTypeFilter === 'all') {
+    return true;
+  }
+
+  if (row.shippingType === shippingTypeFilter) {
+    return true;
+  }
+
+  return (row.individualOrders ?? []).some((order) => order.shippingType === shippingTypeFilter);
+}
+
 function isDeliveredLateOrder(
   order: Pick<ApiOrderRow, 'shippingType' | 'shippingStage' | 'shippingExpectedDate' | 'shippingDeliveredAt'>,
 ) {
@@ -264,6 +301,31 @@ function canPrintShippingLabel(
     order.shippingStage === 'ready_to_ship' ||
     order.shippingStage === 'shipped'
   );
+}
+
+function getCancellableOrderIds(row: Pick<OrderTableRow, 'id' | 'status' | 'shippingStage' | 'shippingStatus' | 'individualOrders'>) {
+  const orders = row.individualOrders?.length
+    ? row.individualOrders
+    : [
+        {
+          id: row.id,
+          status: row.status,
+          shippingStage: row.shippingStage ?? null,
+          shippingStatus: row.shippingStatus ?? null,
+        },
+      ];
+
+  return orders
+    .filter((order) => {
+      const stage = order.shippingStage?.toLowerCase() ?? '';
+      const shippingStatus = order.shippingStatus?.toLowerCase() ?? '';
+      const status = order.status?.toLowerCase() ?? '';
+
+      return !['delivered', 'cancelled', 'rescheduled'].includes(stage) &&
+        !['delivered', 'cancelled'].includes(shippingStatus) &&
+        !['delivered', 'canceled', 'cancelled'].includes(status);
+    })
+    .map((order) => order.id);
 }
 
 function isFlexRescheduledOrder(
@@ -296,6 +358,10 @@ function getModalStatusMeta(row: Pick<OrderTableRow, 'shippingStage' | 'shipping
     return {
       label: row.shippingStage === 'delivered' ? 'Entregada demorada' : 'Demorada',
       tone: 'danger' as const,
+      icon: getShippingStageIcon(row.shippingStage, {
+        overdue: true,
+        deliveredLate: row.shippingStage === 'delivered',
+      }),
     };
   }
 
@@ -308,6 +374,7 @@ function getModalStatusMeta(row: Pick<OrderTableRow, 'shippingStage' | 'shipping
   return {
     label,
     tone: getShippingStageTone(row.shippingStage),
+    icon: getShippingStageIcon(row.shippingStage),
   };
 }
 
@@ -438,53 +505,19 @@ async function openBulkShippingLabelPdf(orderIds: string[]) {
   }
 }
 
-async function fetchOrdersDataset(
-  filter: 'all' | 'shippingToday' | 'inTransit' | 'finalized',
-  shippingDate: string,
-  selectedAccountId?: string,
-  selectedPlatform?: PlatformCode | '',
-) {
-  const params = new URLSearchParams();
-  params.set('limit', '500');
-  if (selectedAccountId) {
-    params.set('accountId', selectedAccountId);
-  }
-  if (selectedPlatform) {
-    params.set('platform', selectedPlatform);
-  }
-  if (filter === 'shippingToday') {
-    params.set('onlyShippingToday', 'true');
-    params.set('shippingDate', shippingDate);
-  }
-
-  const response = await fetchApi<OrdersResponse>(
-    `/orders${params.size > 0 ? `?${params.toString()}` : ''}`,
-  );
-
-  return {
-    rows: response.data.map((order) => ({
-      ...order,
-      totalAmount: Number(order.totalAmount),
-      profitAmount:
-        order.profitAmount === null || order.profitAmount === undefined
-          ? null
-          : Number(order.profitAmount),
-    })),
-    meta: response.meta ?? {},
-  } satisfies OrdersQueryData;
-}
-
 function buildGroupedOrderRows(
   rows: ApiOrderRow[],
   filter: 'shippingToday' | 'upcoming' | 'inTransit' | 'finalized',
 ): OrderTableRow[] {
   const groups = new Map<string, ApiOrderRow[]>();
-  const getOrderTime = (value?: string | null) => {
-    if (!value) {
+  const getOrderTime = (row: Pick<ApiOrderRow, 'placedAt' | 'importedAt' | 'createdAt'>) => {
+    const referenceDate = row.placedAt ?? row.importedAt ?? row.createdAt ?? null;
+
+    if (!referenceDate) {
       return Number.POSITIVE_INFINITY;
     }
 
-    const time = new Date(value).getTime();
+    const time = new Date(referenceDate).getTime();
     return Number.isNaN(time) ? Number.POSITIVE_INFINITY : time;
   };
 
@@ -500,7 +533,7 @@ function buildGroupedOrderRows(
   const grouped = Array.from(groups.values()).map((group) => {
     const sortedGroup =
       filter === 'shippingToday'
-        ? [...group].sort((left, right) => getOrderTime(left.placedAt) - getOrderTime(right.placedAt))
+        ? [...group].sort((left, right) => getOrderTime(right) - getOrderTime(left))
         : group;
     const primaryRow = sortedGroup[0]!;
     const totalAmount = sortedGroup.reduce((sum, row) => sum + Number(row.totalAmount), 0);
@@ -512,12 +545,24 @@ function buildGroupedOrderRows(
 
       return sum + Number(row.profitAmount);
     }, 0);
+    const estimatedNetBeforeCost = sortedGroup.reduce<number | null>((sum, row) => {
+      if (
+        sum === null ||
+        row.estimatedNetBeforeCost === null ||
+        row.estimatedNetBeforeCost === undefined
+      ) {
+        return null;
+      }
+
+      return sum + Number(row.estimatedNetBeforeCost);
+    }, 0);
 
     return {
       ...primaryRow,
       totalAmount,
       totalUnits,
       profitAmount,
+      estimatedNetBeforeCost,
       shippingDeliveredLate: sortedGroup.some((row) => isDeliveredLateOrder(row)),
       individualOrders: sortedGroup.map((row) => ({
         id: row.id,
@@ -551,7 +596,7 @@ function buildGroupedOrderRows(
   }
 
   return grouped.sort(
-    (left, right) => getOrderTime(left.placedAt ?? null) - getOrderTime(right.placedAt ?? null),
+    (left, right) => getOrderTime(right) - getOrderTime(left),
   );
 }
 
@@ -708,8 +753,16 @@ export default function OrdersPage() {
   const [accountId, setAccountId] = useState('');
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformCode | ''>('');
+  const [shippingTypeFilter, setShippingTypeFilter] = useState<ShippingTypeFilter>('all');
+  const [isPlatformMenuOpen, setIsPlatformMenuOpen] = useState(false);
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const [isShippingTypeMenuOpen, setIsShippingTypeMenuOpen] = useState(false);
+  const platformMenuRef = useRef<HTMLDivElement | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const shippingTypeMenuRef = useRef<HTMLDivElement | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
   const [openActionMenuId, setOpenActionMenuId] = useState<string | null>(null);
+  const [selectedTotalsMode, setSelectedTotalsMode] = useState<'gross' | 'estimated'>('gross');
   const [filter, setFilter] = useState<
     'shippingToday' | 'upcoming' | 'inTransit' | 'finalized'
   >('shippingToday');
@@ -718,12 +771,16 @@ export default function OrdersPage() {
   const [inTransitStageFilter, setInTransitStageFilter] = useState<InTransitStageFilter>('all');
   const [finalizedStageFilter, setFinalizedStageFilter] = useState<FinalizedStageFilter>('all');
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<OrderTableRow | null>(null);
+  const [pendingCancelOrder, setPendingCancelOrder] = useState<OrderTableRow | null>(null);
+  const [cancelReason, setCancelReason] = useState<(typeof CANCEL_REASON_OPTIONS)[number] | ''>('');
   const [selectedOrderTab, setSelectedOrderTab] = useState<OrderDetailTab>('products');
   const [shippingTodayDate, setShippingTodayDate] = useState(() => getLocalDateKey());
   const [isBulkPrinting, setIsBulkPrinting] = useState(false);
   const selectedOrderCount = selectedOrder?.individualOrders?.length ?? 1;
   const isGroupedSelectedOrder = selectedOrderCount > 1;
+  const selectedOrderCancellableIds = selectedOrder ? getCancellableOrderIds(selectedOrder) : [];
   const selectedOrderPreviewImages = Array.from(
     new Set(
       [
@@ -758,11 +815,66 @@ export default function OrdersPage() {
     return () => window.clearTimeout(timeoutId);
   }, [syncFeedback]);
 
+  useEffect(() => {
+    if (!isPlatformMenuOpen && !isAccountMenuOpen && !isShippingTypeMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+
+      if (
+        platformMenuRef.current &&
+        target &&
+        !platformMenuRef.current.contains(target)
+      ) {
+        setIsPlatformMenuOpen(false);
+      }
+
+      if (
+        accountMenuRef.current &&
+        target &&
+        !accountMenuRef.current.contains(target)
+      ) {
+        setIsAccountMenuOpen(false);
+      }
+
+      if (
+        shippingTypeMenuRef.current &&
+        target &&
+        !shippingTypeMenuRef.current.contains(target)
+      ) {
+        setIsShippingTypeMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [isAccountMenuOpen, isPlatformMenuOpen, isShippingTypeMenuOpen]);
+
+  useEffect(() => {
+    if (!openActionMenuId) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as HTMLElement | null;
+
+      if (target?.closest('[data-order-actions-menu="true"]')) {
+        return;
+      }
+
+      setOpenActionMenuId(null);
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [openActionMenuId]);
+
   const { data: accounts = [] } = useQuery({
     queryKey: ['orders-accounts-options'],
     queryFn: () => fetchApi<ApiAccount[]>('/accounts'),
     staleTime: 5 * 60 * 1000,
-    refetchOnMount: 'always',
     refetchOnWindowFocus: false,
   });
 
@@ -807,6 +919,37 @@ export default function OrdersPage() {
     return entries;
   }, [orderMessages?.data]);
 
+  const messageConversationByKey = useMemo(() => {
+    const entries = new Map<
+      string,
+      {
+        conversationId?: string;
+        accountId?: string;
+        resource?: string | null;
+      }
+    >();
+
+    for (const conversation of orderMessages?.data ?? []) {
+      const keys = [conversation.packId, conversation.orderId].filter(
+        (value): value is string => Boolean(value),
+      );
+
+      for (const key of keys) {
+        if (entries.has(key)) {
+          continue;
+        }
+
+        entries.set(key, {
+          conversationId: conversation.id,
+          accountId: conversation.accountId,
+          resource: conversation.resource ?? null,
+        });
+      }
+    }
+
+    return entries;
+  }, [orderMessages?.data]);
+
   const accountPlatformById = useMemo(() => {
     return new Map(
       accounts.map((account) => [
@@ -836,49 +979,58 @@ export default function OrdersPage() {
   }, [accounts]);
 
   const allOrdersQuery = useQuery({
-    queryKey: ['orders-page', 'all', selectedAccountId || 'default', selectedPlatform || 'all'],
-    staleTime: 60 * 1000,
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    refetchInterval: 30 * 1000,
+    queryKey: getOrdersDatasetQueryKey('all', shippingTodayDate, selectedAccountId, selectedPlatform),
+    staleTime: 2 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: filter === 'upcoming' ? 30 * 1000 : false,
     refetchIntervalInBackground: false,
     queryFn: () => fetchOrdersDataset('all', shippingTodayDate, selectedAccountId, selectedPlatform),
   });
 
   const shippingTodayOrdersQuery = useQuery({
-    queryKey: [
-      'orders-page',
+    queryKey: getOrdersDatasetQueryKey(
       'shippingToday',
       shippingTodayDate,
-      selectedAccountId || 'default',
-      selectedPlatform || 'all',
-    ],
-    staleTime: 15 * 1000,
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    refetchInterval: 30 * 1000,
+      selectedAccountId,
+      selectedPlatform,
+    ),
+    staleTime: 30 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: filter === 'shippingToday' ? 30 * 1000 : false,
     refetchIntervalInBackground: false,
     queryFn: () =>
       fetchOrdersDataset('shippingToday', shippingTodayDate, selectedAccountId, selectedPlatform),
   });
 
   const inTransitOrdersQuery = useQuery({
-    queryKey: ['orders-page', 'inTransit', selectedAccountId || 'default', selectedPlatform || 'all'],
-    staleTime: 60 * 1000,
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    refetchInterval: 30 * 1000,
+    queryKey: getOrdersDatasetQueryKey(
+      'inTransit',
+      shippingTodayDate,
+      selectedAccountId,
+      selectedPlatform,
+    ),
+    staleTime: 2 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: filter === 'inTransit' ? 30 * 1000 : false,
     refetchIntervalInBackground: false,
     queryFn: () =>
       fetchOrdersDataset('inTransit', shippingTodayDate, selectedAccountId, selectedPlatform),
   });
 
   const finalizedOrdersQuery = useQuery({
-    queryKey: ['orders-page', 'finalized', selectedAccountId || 'default', selectedPlatform || 'all'],
-    staleTime: 60 * 1000,
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    refetchInterval: 30 * 1000,
+    queryKey: getOrdersDatasetQueryKey(
+      'finalized',
+      shippingTodayDate,
+      selectedAccountId,
+      selectedPlatform,
+    ),
+    staleTime: 2 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: filter === 'finalized' ? 30 * 1000 : false,
     refetchIntervalInBackground: false,
     queryFn: () =>
       fetchOrdersDataset('finalized', shippingTodayDate, selectedAccountId, selectedPlatform),
@@ -899,6 +1051,61 @@ export default function OrdersPage() {
       setSelectedOrderTab('products');
     }
   }, [selectedOrder]);
+
+  function renderOrderSidebar() {
+    return (
+      <section className="h-full rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
+        <div className="flex h-full flex-col">
+          <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
+            Acciones
+          </p>
+          <div className="mt-3 flex flex-1 flex-col gap-3">
+            <button
+              type="button"
+              onClick={() => selectedOrder && void handlePrintLabel(selectedOrder)}
+              disabled={!selectedOrder || printingOrderId === selectedOrder.id}
+              className="inline-flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm font-semibold text-night transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Printer className="h-4 w-4 text-ink/55" />
+                <span>Imprimir etiqueta</span>
+              </span>
+              <span className="text-xs font-medium text-ink/45">
+                {selectedOrder && printingOrderId === selectedOrder.id ? 'Preparando' : 'Acción'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => selectedOrder && handleOpenMessages(selectedOrder)}
+              disabled={!selectedOrder}
+              className="inline-flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm font-semibold text-night transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <span className="inline-flex items-center gap-2">
+                <MessageSquare className="h-4 w-4 text-ink/55" />
+                <span>{selectedOrder?.hasMessages ? 'Ver mensaje' : 'Enviar mensaje'}</span>
+              </span>
+              <span className="text-xs font-medium text-ink/45">
+                {selectedOrder?.hasMessages ? 'Bandeja' : 'Ir'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => selectedOrder && void handleCancelOrder(selectedOrder)}
+              disabled={!selectedOrder || cancelOrdersMutation.isPending || selectedOrderCancellableIds.length === 0}
+              className="inline-flex w-full items-center justify-between rounded-2xl border border-rose-300/80 bg-rose-50/80 px-4 py-3 text-left text-sm font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <span>Cancelar orden</span>
+              <span className="text-xs font-medium text-rose-500">
+                {cancelOrdersMutation.isPending && selectedOrder && cancellingOrderId === selectedOrder.id
+                  ? 'Procesando'
+                  : 'Acción'}
+              </span>
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   const data =
     filter === 'shippingToday'
@@ -1294,19 +1501,24 @@ export default function OrdersPage() {
   const filteredGroupedRows = useMemo(() => {
     if (filter === 'inTransit') {
       if (inTransitStageFilter === 'all') {
-        return inTransitRows;
+        return inTransitRows.filter((row) => matchesShippingTypeFilter(row, shippingTypeFilter));
       }
 
       if (inTransitStageFilter === 'overdue') {
-        return inTransitRows.filter((row) => row.shippingOverdue);
+        return inTransitRows.filter(
+          (row) => row.shippingOverdue && matchesShippingTypeFilter(row, shippingTypeFilter),
+        );
       }
 
       if (inTransitStageFilter === 'rescheduled') {
-        return inTransitRescheduledRows;
+        return inTransitRescheduledRows.filter((row) =>
+          matchesShippingTypeFilter(row, shippingTypeFilter),
+        );
       }
 
       return inTransitRows.filter(
         (row) =>
+          matchesShippingTypeFilter(row, shippingTypeFilter) &&
           !row.shippingOverdue &&
           isRowInTransit(row) &&
           !(row.individualOrders ?? []).some((order) => order.shippingStage === 'rescheduled'),
@@ -1315,51 +1527,71 @@ export default function OrdersPage() {
 
     if (filter === 'finalized') {
       if (finalizedStageFilter === 'all') {
-        return groupedRows.filter((row) => getFinalizedStageForRow(row) !== null);
+        return groupedRows.filter(
+          (row) =>
+            getFinalizedStageForRow(row) !== null &&
+            matchesShippingTypeFilter(row, shippingTypeFilter),
+        );
       }
 
-      return groupedRows.filter((row) => getFinalizedStageForRow(row) === finalizedStageFilter);
+      return groupedRows.filter(
+        (row) =>
+          getFinalizedStageForRow(row) === finalizedStageFilter &&
+          matchesShippingTypeFilter(row, shippingTypeFilter),
+      );
     }
 
     if (filter === 'upcoming') {
       if (upcomingStageFilter === 'all') {
-        return upcomingRows;
+        return upcomingRows.filter((row) => matchesShippingTypeFilter(row, shippingTypeFilter));
       }
 
       return upcomingRows.filter((row) =>
+        matchesShippingTypeFilter(row, shippingTypeFilter) &&
         (row.individualOrders ?? []).some((order) => order.shippingStage === upcomingStageFilter),
       );
     }
 
     if (filter === 'shippingToday' && shippingStageFilter === 'overdue') {
-      return overdueStageRows;
+      return overdueStageRows.filter((row) => matchesShippingTypeFilter(row, shippingTypeFilter));
     }
 
     if (filter !== 'shippingToday' || shippingStageFilter === 'all') {
-      return filter === 'shippingToday' ? shippingTodayAllRows : groupedRows;
+      const baseRows = filter === 'shippingToday' ? shippingTodayAllRows : groupedRows;
+      return baseRows.filter((row) => matchesShippingTypeFilter(row, shippingTypeFilter));
     }
 
     return shippingTodayAllRows.filter((row) => {
       if (shippingStageFilter === 'shipped') {
         return (
+          matchesShippingTypeFilter(row, shippingTypeFilter) &&
           !row.shippingOverdue &&
           isRowInTransit(row)
         );
       }
 
       if (shippingStageFilter === 'delivered') {
-        return (row.individualOrders ?? []).some((order) => order.shippingStage === 'delivered');
+        return (
+          matchesShippingTypeFilter(row, shippingTypeFilter) &&
+          (row.individualOrders ?? []).some((order) => order.shippingStage === 'delivered')
+        );
       }
 
       if (shippingStageFilter === 'cancelled') {
-        return (row.individualOrders ?? []).some((order) => order.shippingStage === 'cancelled');
+        return (
+          matchesShippingTypeFilter(row, shippingTypeFilter) &&
+          (row.individualOrders ?? []).some((order) => order.shippingStage === 'cancelled')
+        );
       }
 
-      return (row.individualOrders ?? []).some(
-        (order) => order.shippingStage === shippingStageFilter,
+      return (
+        matchesShippingTypeFilter(row, shippingTypeFilter) &&
+        (row.individualOrders ?? []).some(
+          (order) => order.shippingStage === shippingStageFilter,
+        )
       );
     });
-  }, [filter, finalizedStageFilter, groupedRows, inTransitRescheduledRows, inTransitRows, inTransitStageFilter, overdueStageRows, shippingStageFilter, shippingTodayAllRows, shippingTodayGroupKeys, overdueShippingRows, upcomingRows, upcomingStageFilter]);
+  }, [filter, finalizedStageFilter, groupedRows, inTransitRescheduledRows, inTransitRows, inTransitStageFilter, overdueStageRows, shippingStageFilter, shippingTodayAllRows, shippingTodayGroupKeys, overdueShippingRows, shippingTypeFilter, upcomingRows, upcomingStageFilter]);
 
   const shippingStageCounts = useMemo(() => {
     const countByStage = {
@@ -1468,6 +1700,164 @@ export default function OrdersPage() {
     },
   });
 
+  const cancelOrdersMutation = useMutation({
+    mutationFn: async ({ row, orderIds }: { row: OrderTableRow; orderIds: string[] }) => {
+      for (const orderId of orderIds) {
+        await postApi(`/orders/${orderId}/cancel`);
+      }
+
+      return {
+        row,
+        orderIds,
+      };
+    },
+    onMutate: ({ row }) => {
+      setActionError(null);
+      setCancellingOrderId(row.id);
+    },
+    onSuccess: async ({ row, orderIds }) => {
+      const cancelledOrderIds = new Set(orderIds);
+      setPendingCancelOrder(null);
+      setCancelReason('');
+
+      setSelectedOrder((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const nextIndividualOrders = (current.individualOrders ?? []).map((order) =>
+          cancelledOrderIds.has(order.id)
+            ? {
+                ...order,
+                status: 'canceled',
+                shippingStatus: 'cancelled',
+                shippingStage: 'cancelled' as const,
+              }
+            : order,
+        );
+
+        const primaryCancelled = cancelledOrderIds.has(current.id);
+
+        return {
+          ...current,
+          status: primaryCancelled ? 'canceled' : current.status,
+          shippingStatus: primaryCancelled ? 'cancelled' : current.shippingStatus,
+          shippingStage: primaryCancelled ? ('cancelled' as const) : current.shippingStage,
+          individualOrders: nextIndividualOrders,
+        };
+      });
+
+      setOpenActionMenuId(null);
+      setSyncFeedback({
+        tone: 'success',
+        title: orderIds.length > 1 ? 'Órdenes canceladas' : 'Orden cancelada',
+        message:
+          orderIds.length > 1
+            ? `Cancelamos ${orderIds.length} órdenes de ${row.packId ? `Pack ${row.packId}` : row.orderNumber}.`
+            : `Cancelamos ${row.packId ? `Pack ${row.packId}` : row.orderNumber}.`,
+      });
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['orders-page'] }),
+        selectedOrder?.id
+          ? queryClient.invalidateQueries({ queryKey: ['order-detail', selectedOrder.id] })
+          : Promise.resolve(),
+      ]);
+    },
+    onError: (mutationError) => {
+      setActionError(
+        mutationError instanceof ApiError
+          ? mutationError.message
+          : 'No pudimos cancelar la orden.',
+      );
+    },
+    onSettled: () => {
+      setCancellingOrderId(null);
+    },
+  });
+
+  async function handleCancelOrder(row: OrderTableRow) {
+    const orderIds = getCancellableOrderIds(row);
+
+    if (orderIds.length === 0 || cancelOrdersMutation.isPending) {
+      return;
+    }
+    setPendingCancelOrder(row);
+    setCancelReason('');
+  }
+
+  function confirmCancelOrder() {
+    if (!pendingCancelOrder || !cancelReason || cancelOrdersMutation.isPending) {
+      return;
+    }
+
+    const orderIds = getCancellableOrderIds(pendingCancelOrder);
+    if (orderIds.length === 0) {
+      return;
+    }
+
+    cancelOrdersMutation.mutate({ row: pendingCancelOrder, orderIds });
+  }
+
+  async function handlePrintLabel(row: OrderTableRow) {
+    try {
+      setActionError(null);
+      setPrintingOrderId(row.id);
+
+      const printableOrderIds = (row.individualOrders ?? [])
+        .filter((order) => canPrintShippingLabel(order))
+        .map((order) => order.id);
+
+      if (printableOrderIds.length > 1) {
+        await openBulkShippingLabelPdf(printableOrderIds);
+        return;
+      }
+
+      try {
+        await printOfficialShippingLabel(row.id);
+      } catch {
+        const detail = await fetchApi<OrderDetailResponse>(`/orders/${row.id}`);
+        const printWindow = window.open(
+          '',
+          '_blank',
+          'noopener,noreferrer,width=900,height=900',
+        );
+
+        if (!printWindow) {
+          throw new Error('El navegador bloqueó la ventana de impresión.');
+        }
+
+        printWindow.document.open();
+        printWindow.document.write(buildPrintLabelHtml(detail));
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
+      }
+    } catch (printError) {
+      setActionError(
+        printError instanceof Error
+          ? printError.message
+          : 'No pudimos preparar la etiqueta para impresión.',
+      );
+    } finally {
+      setPrintingOrderId(null);
+    }
+  }
+
+  function handleOpenMessages(row: OrderTableRow) {
+    const keys = [row.packId, row.orderNumber].filter((value): value is string => Boolean(value));
+    const match = keys
+      .map((key) => messageConversationByKey.get(key))
+      .find((value) => Boolean(value?.conversationId));
+
+    if (match?.conversationId) {
+      window.location.assign(`/messages?conversationId=${encodeURIComponent(match.conversationId)}`);
+      return;
+    }
+
+    window.location.assign('/messages');
+  }
+
   useEffect(() => {
     if (!allOrdersData) {
       return;
@@ -1505,6 +1895,13 @@ export default function OrdersPage() {
     [accounts, selectedPlatform],
   );
   const hasSinglePlatformOption = platformOptions.length === 1;
+  const selectedPlatformLabel = selectedPlatform
+    ? platformOptions.find((option) => option.value === selectedPlatform)?.label ??
+      formatPlatformLabel(selectedPlatform)
+    : 'Todas las plataformas';
+  const selectedAccountLabel = selectedAccountId
+    ? accountOptions.find((option) => option.value === selectedAccountId)?.label ?? 'Cuenta'
+    : 'Todas las cuentas';
   const hasSingleAccountOption = accountOptions.length === 1;
 
   useEffect(() => {
@@ -1683,6 +2080,32 @@ export default function OrdersPage() {
     );
   }, [filteredGroupedRows, selectedOrderIds]);
 
+  const selectedPrintableRowsEstimatedAmount = useMemo<number | null>(() => {
+    return filteredGroupedRows.reduce<number | null>((sum, row) => {
+      if (!selectedOrderIds.includes(row.id)) {
+        return sum;
+      }
+
+      const printableOrderIds = (row.individualOrders ?? [])
+        .filter((order) => canPrintShippingLabel(order))
+        .map((order) => order.id);
+
+      if (printableOrderIds.length === 0 && !canPrintShippingLabel(row)) {
+        return sum;
+      }
+
+      if (
+        sum === null ||
+        row.estimatedNetBeforeCost === null ||
+        row.estimatedNetBeforeCost === undefined
+      ) {
+        return null;
+      }
+
+      return sum + Number(row.estimatedNetBeforeCost);
+    }, 0);
+  }, [filteredGroupedRows, selectedOrderIds]);
+
   const allSelectableRowsSelected =
     selectableRowIds.size > 0 && Array.from(selectableRowIds).every((rowId) => selectedOrderIds.includes(rowId));
 
@@ -1760,43 +2183,13 @@ export default function OrdersPage() {
           setActionError(null);
           setSelectedOrder(row);
         },
-        onPrintLabel: async (row) => {
-          try {
-            setActionError(null);
-            setPrintingOrderId(row.id);
-            try {
-              await printOfficialShippingLabel(row.id);
-            } catch {
-              const detail = await fetchApi<OrderDetailResponse>(`/orders/${row.id}`);
-              const printWindow = window.open(
-                '',
-                '_blank',
-                'noopener,noreferrer,width=900,height=900',
-              );
-
-              if (!printWindow) {
-                throw new Error('El navegador bloqueó la ventana de impresión.');
-              }
-
-              printWindow.document.open();
-              printWindow.document.write(buildPrintLabelHtml(detail));
-              printWindow.document.close();
-              printWindow.focus();
-              printWindow.print();
-            }
-          } catch (printError) {
-            setActionError(
-              printError instanceof Error
-                ? printError.message
-                : 'No pudimos preparar la etiqueta para impresión.',
-            );
-          } finally {
-            setPrintingOrderId(null);
-          }
-        },
+        onOpenMessages: handleOpenMessages,
+        onCancelOrder: handleCancelOrder,
+        onPrintLabel: handlePrintLabel,
+        cancellingOrderId,
         printingOrderId,
       }),
-    [allSelectableRowsSelected, openActionMenuId, printingOrderId, selectableRowIds, selectedOrderIds],
+    [allSelectableRowsSelected, cancellingOrderId, openActionMenuId, printingOrderId, selectableRowIds, selectedOrderIds],
   );
 
   async function handleBulkPrintReadyLabels() {
@@ -1841,6 +2234,23 @@ export default function OrdersPage() {
 
   return (
     <>
+      <style jsx global>{`
+        @keyframes syncShimmer {
+          0% {
+            transform: translateX(0%);
+            opacity: 0.2;
+          }
+
+          50% {
+            opacity: 0.95;
+          }
+
+          100% {
+            transform: translateX(320%);
+            opacity: 0.2;
+          }
+        }
+      `}</style>
       <PageShell
         title="Órdenes centralizadas"
         description="Consulta y filtra todas las ventas importadas desde tus canales sin saltar entre plataformas."
@@ -1848,10 +2258,28 @@ export default function OrdersPage() {
           <button
             type="button"
             onClick={openModal}
-            disabled={accountOptions.length === 0}
-            className="rounded-2xl bg-gradient-to-r from-moss to-aurora px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-moss/20 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={accountOptions.length === 0 || manualSyncOrders.isPending}
+            className={`relative inline-flex max-w-[320px] items-center gap-2 overflow-hidden rounded-2xl px-5 py-3 text-sm font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60 ${
+              manualSyncOrders.isPending
+                ? 'bg-[linear-gradient(135deg,#0f172a_0%,#1e3a5f_48%,#0ea5e9_100%)] shadow-sky/20'
+                : 'bg-gradient-to-r from-moss to-aurora shadow-moss/20 hover:scale-[1.01]'
+            }`}
+            title="Trae historial reciente y mejora órdenes y mensajería"
           >
-            Sincronizar órdenes
+            {manualSyncOrders.isPending ? (
+              <span
+                className="pointer-events-none absolute inset-0 opacity-70"
+                aria-hidden="true"
+              >
+                <span className="absolute inset-y-0 left-[-35%] w-1/3 animate-[syncShimmer_1.4s_ease-in-out_infinite] bg-white/15 blur-xl" />
+              </span>
+            ) : null}
+            {manualSyncOrders.isPending ? (
+              <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-white/90" />
+            ) : (
+              <RefreshCcw className="h-4 w-4 shrink-0 text-white/90" />
+            )}
+            <span>{manualSyncOrders.isPending ? 'Sincronizando órdenes...' : 'Sincronizar órdenes'}</span>
           </button>
         }
       >
@@ -1870,97 +2298,179 @@ export default function OrdersPage() {
             <div className="space-y-3">
               <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <button
-                    type="button"
+                  <FilterChip
+                    label="Envíos de hoy"
+                    count={shippingTodayCount}
+                    active={filter === 'shippingToday'}
                     onClick={() => changeFilter('shippingToday')}
-                    aria-pressed={filter === 'shippingToday'}
-                    className={`min-w-[132px] rounded-full px-4 py-2 text-[13px] font-medium transition-colors ${
-                      filter === 'shippingToday'
-                        ? 'border border-night bg-night text-white'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-ink'
-                    }`}
-                  >
-                    Envíos de hoy
-                    <span className="ml-2 text-xs opacity-80">{shippingTodayCount}</span>
-                  </button>
-                  <button
-                    type="button"
+                    variant="tab"
+                    className="min-w-[132px]"
+                  />
+                  <FilterChip
+                    label="Próximos días"
+                    count={upcomingCount}
+                    active={filter === 'upcoming'}
                     onClick={() => changeFilter('upcoming')}
-                    aria-pressed={filter === 'upcoming'}
-                    className={`min-w-[132px] rounded-full px-4 py-2 text-[13px] font-medium transition-colors ${
-                      filter === 'upcoming'
-                        ? 'border border-night bg-night text-white'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-ink'
-                    }`}
-                  >
-                    Próximos días
-                    <span className="ml-2 text-xs opacity-80">{upcomingCount}</span>
-                  </button>
-                  <button
-                    type="button"
+                    variant="tab"
+                    className="min-w-[132px]"
+                  />
+                  <FilterChip
+                    label="En transito"
+                    count={inTransitCount}
+                    active={filter === 'inTransit'}
                     onClick={() => changeFilter('inTransit')}
-                    aria-pressed={filter === 'inTransit'}
-                    className={`min-w-[112px] rounded-full px-4 py-2 text-[13px] font-medium transition-colors ${
-                      filter === 'inTransit'
-                        ? 'border border-night bg-night text-white'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-ink'
-                    }`}
-                  >
-                    En transito
-                    <span className="ml-2 text-xs opacity-80">{inTransitCount}</span>
-                  </button>
-                  <button
-                    type="button"
+                    variant="tab"
+                    className="min-w-[112px]"
+                  />
+                  <FilterChip
+                    label="Finalizado"
+                    count={finalizedCount}
+                    active={filter === 'finalized'}
                     onClick={() => changeFilter('finalized')}
-                    aria-pressed={filter === 'finalized'}
-                    className={`min-w-[112px] rounded-full px-4 py-2 text-[13px] font-medium transition-colors ${
-                      filter === 'finalized'
-                        ? 'border border-night bg-night text-white'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-ink'
-                    }`}
-                  >
-                    Finalizado
-                    <span className="ml-2 text-xs opacity-80">{finalizedCount}</span>
-                  </button>
+                    variant="tab"
+                    className="min-w-[112px]"
+                  />
                 </div>
                 <div className="flex flex-wrap items-end gap-3 xl:justify-end">
                   <div className="w-[180px]">
                     <label className="mb-1.5 block text-[11px] font-medium text-ink/50">
                       Plataforma
                     </label>
-                    <select
-                      value={selectedPlatform}
-                      onChange={(event) => setSelectedPlatform(event.target.value as PlatformCode | '')}
-                      disabled={hasSinglePlatformOption}
-                      className={`${inputClassName()} bg-white`}
-                    >
-                      {!hasSinglePlatformOption ? (
-                        <option value="">Todas las plataformas</option>
+                    <div ref={platformMenuRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (hasSinglePlatformOption) {
+                            return;
+                          }
+
+                          setIsAccountMenuOpen(false);
+                          setIsShippingTypeMenuOpen(false);
+                          setIsPlatformMenuOpen((current) => !current);
+                        }}
+                        disabled={hasSinglePlatformOption}
+                        className={selectorClassName()}
+                      >
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          {selectedPlatform ? (
+                            <PlatformLogo platform={selectedPlatform} className="h-4 w-4 shrink-0" />
+                          ) : (
+                            <Filter className="h-4 w-4 shrink-0 text-ink/40" />
+                          )}
+                          <span className="truncate">{selectedPlatformLabel}</span>
+                        </span>
+                        <ChevronDown className="h-4 w-4 shrink-0 text-ink/35" />
+                      </button>
+                      {isPlatformMenuOpen && !hasSinglePlatformOption ? (
+                        <div className="absolute left-0 z-20 mt-2 min-w-full rounded-2xl border border-black/10 bg-white p-2 shadow-xl">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedPlatform('');
+                              setIsPlatformMenuOpen(false);
+                            }}
+                            className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${
+                              !selectedPlatform
+                                ? 'bg-slate-100 font-semibold text-night'
+                                : 'text-ink/75 hover:bg-slate-50'
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <Filter className="h-4 w-4 text-ink/45" />
+                              <span>Todas las plataformas</span>
+                            </span>
+                          </button>
+                          {platformOptions.map((platform) => (
+                            <button
+                              key={platform.value}
+                              type="button"
+                              onClick={() => {
+                                setSelectedPlatform(platform.value);
+                                setIsPlatformMenuOpen(false);
+                              }}
+                              className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${
+                                selectedPlatform === platform.value
+                                  ? 'bg-slate-100 font-semibold text-night'
+                                  : 'text-ink/75 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className="inline-flex items-center gap-2">
+                                <PlatformLogo platform={platform.value} className="h-4 w-4 shrink-0" />
+                                <span>{platform.label}</span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
                       ) : null}
-                      {platformOptions.map((platform) => (
-                        <option key={platform.value} value={platform.value}>
-                          {platform.label}
-                        </option>
-                      ))}
-                    </select>
+                    </div>
                   </div>
                   <div className="w-[220px]">
                     <label className="mb-1.5 block text-[11px] font-medium text-ink/50">
                       Cuenta
                     </label>
-                    <select
-                      value={selectedAccountId}
-                      onChange={(event) => setSelectedAccountId(event.target.value)}
-                      disabled={hasSingleAccountOption}
-                      className={`${inputClassName()} bg-white`}
-                    >
-                      {!hasSingleAccountOption ? <option value="">Todas las cuentas</option> : null}
-                      {accountOptions.map((account) => (
-                        <option key={account.value} value={account.value}>
-                          {account.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div ref={accountMenuRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (hasSingleAccountOption) {
+                            return;
+                          }
+
+                          setIsPlatformMenuOpen(false);
+                          setIsShippingTypeMenuOpen(false);
+                          setIsAccountMenuOpen((current) => !current);
+                        }}
+                        disabled={hasSingleAccountOption}
+                        className={selectorClassName()}
+                      >
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          <Building2 className="h-4 w-4 shrink-0 text-ink/40" />
+                          <span className="truncate">{selectedAccountLabel}</span>
+                        </span>
+                        <ChevronDown className="h-4 w-4 shrink-0 text-ink/35" />
+                      </button>
+                      {isAccountMenuOpen && !hasSingleAccountOption ? (
+                        <div className="absolute left-0 z-20 mt-2 min-w-full rounded-2xl border border-black/10 bg-white p-2 shadow-xl">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedAccountId('');
+                              setIsAccountMenuOpen(false);
+                            }}
+                            className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${
+                              !selectedAccountId
+                                ? 'bg-slate-100 font-semibold text-night'
+                                : 'text-ink/75 hover:bg-slate-50'
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <Building2 className="h-4 w-4 text-ink/45" />
+                              <span>Todas las cuentas</span>
+                            </span>
+                          </button>
+                          {accountOptions.map((account) => (
+                            <button
+                              key={account.value}
+                              type="button"
+                              onClick={() => {
+                                setSelectedAccountId(account.value);
+                                setIsAccountMenuOpen(false);
+                              }}
+                              className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${
+                                selectedAccountId === account.value
+                                  ? 'bg-slate-100 font-semibold text-night'
+                                  : 'text-ink/75 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className="inline-flex min-w-0 items-center gap-2">
+                                <Building2 className="h-4 w-4 shrink-0 text-ink/45" />
+                                <span className="truncate">{account.label}</span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1974,123 +2484,61 @@ export default function OrdersPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
+                  <FilterChip
+                    label="Todas"
+                    count={shippingTodayCount}
+                    active={shippingStageFilter === 'all'}
                     onClick={() => setShippingStageFilter('all')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'all'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                    }`}
-                  >
-                    Todas
-                    <span className="ml-2 text-[11px] opacity-75">{shippingTodayCount}</span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="Etiqueta por imprimir"
+                    count={shippingStageCounts.ready_to_print}
+                    active={shippingStageFilter === 'ready_to_print'}
                     disabled={shippingStageCounts.ready_to_print === 0}
                     onClick={() => setShippingStageFilter('ready_to_print')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'ready_to_print'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.ready_to_print === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    Etiqueta por imprimir
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.ready_to_print}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="Listas para despacho"
+                    count={shippingStageCounts.ready_to_ship}
+                    active={shippingStageFilter === 'ready_to_ship'}
                     disabled={shippingStageCounts.ready_to_ship === 0}
                     onClick={() => setShippingStageFilter('ready_to_ship')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'ready_to_ship'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.ready_to_ship === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    Listas para despacho
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.ready_to_ship}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="En tránsito"
+                    count={shippingStageCounts.shipped}
+                    active={shippingStageFilter === 'shipped'}
                     disabled={shippingStageCounts.shipped === 0}
                     onClick={() => setShippingStageFilter('shipped')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'shipped'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.shipped === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    En tránsito
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.shipped}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="Demoradas"
+                    count={shippingStageCounts.overdue}
+                    active={shippingStageFilter === 'overdue'}
                     disabled={shippingStageCounts.overdue === 0}
                     onClick={() => setShippingStageFilter('overdue')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'overdue'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.overdue === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    Demoradas
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.overdue}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="Reprogramadas"
+                    count={shippingStageCounts.rescheduled}
+                    active={shippingStageFilter === 'rescheduled'}
                     disabled={shippingStageCounts.rescheduled === 0}
                     onClick={() => setShippingStageFilter('rescheduled')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'rescheduled'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.rescheduled === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    Reprogramadas
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.rescheduled}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="Entregadas"
+                    count={shippingStageCounts.delivered}
+                    active={shippingStageFilter === 'delivered'}
                     disabled={shippingStageCounts.delivered === 0}
                     onClick={() => setShippingStageFilter('delivered')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
-                      shippingStageFilter === 'delivered'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.delivered === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    Entregadas
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.delivered}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
+                  />
+                  <FilterChip
+                    label="Canceladas"
+                    count={shippingStageCounts.cancelled}
+                    active={shippingStageFilter === 'cancelled'}
                     disabled={shippingStageCounts.cancelled === 0}
                     onClick={() => setShippingStageFilter('cancelled')}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      shippingStageFilter === 'cancelled'
-                        ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                        : 'border border-transparent bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800'
-                    } ${shippingStageCounts.cancelled === 0 ? 'cursor-default opacity-45' : ''}`}
-                  >
-                    Canceladas
-                    <span className="ml-2 text-[11px] opacity-80">
-                      {shippingStageCounts.cancelled}
-                    </span>
-                  </button>
+                  />
                   </div>
                 </div>
               ) : null}
@@ -2104,44 +2552,26 @@ export default function OrdersPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
+                    <FilterChip
+                      label="Todas"
+                      count={upcomingCount}
+                      active={upcomingStageFilter === 'all'}
                       onClick={() => setUpcomingStageFilter('all')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        upcomingStageFilter === 'all'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      }`}
-                    >
-                      Todas
-                      <span className="ml-2 text-[11px] opacity-75">{upcomingCount}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Etiqueta por imprimir"
+                      count={upcomingStageCounts.ready_to_print}
+                      active={upcomingStageFilter === 'ready_to_print'}
                       disabled={upcomingStageCounts.ready_to_print === 0}
                       onClick={() => setUpcomingStageFilter('ready_to_print')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        upcomingStageFilter === 'ready_to_print'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${upcomingStageCounts.ready_to_print === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Etiqueta por imprimir
-                      <span className="ml-2 text-[11px] opacity-75">{upcomingStageCounts.ready_to_print}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Listas para despacho"
+                      count={upcomingStageCounts.ready_to_ship}
+                      active={upcomingStageFilter === 'ready_to_ship'}
                       disabled={upcomingStageCounts.ready_to_ship === 0}
                       onClick={() => setUpcomingStageFilter('ready_to_ship')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        upcomingStageFilter === 'ready_to_ship'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${upcomingStageCounts.ready_to_ship === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Listas para despacho
-                      <span className="ml-2 text-[11px] opacity-75">{upcomingStageCounts.ready_to_ship}</span>
-                    </button>
+                    />
                   </div>
                 </div>
               ) : null}
@@ -2155,57 +2585,33 @@ export default function OrdersPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
+                    <FilterChip
+                      label="Todas"
+                      count={inTransitCount}
+                      active={inTransitStageFilter === 'all'}
                       onClick={() => setInTransitStageFilter('all')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        inTransitStageFilter === 'all'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      }`}
-                    >
-                      Todas
-                      <span className="ml-2 text-[11px] opacity-75">{inTransitCount}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="En tránsito"
+                      count={inTransitStageCounts.shipped}
+                      active={inTransitStageFilter === 'shipped'}
                       disabled={inTransitStageCounts.shipped === 0}
                       onClick={() => setInTransitStageFilter('shipped')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        inTransitStageFilter === 'shipped'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${inTransitStageCounts.shipped === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      En tránsito
-                      <span className="ml-2 text-[11px] opacity-75">{inTransitStageCounts.shipped}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Demoradas"
+                      count={inTransitStageCounts.overdue}
+                      active={inTransitStageFilter === 'overdue'}
                       disabled={inTransitStageCounts.overdue === 0}
                       onClick={() => setInTransitStageFilter('overdue')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        inTransitStageFilter === 'overdue'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${inTransitStageCounts.overdue === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Demoradas
-                      <span className="ml-2 text-[11px] opacity-75">{inTransitStageCounts.overdue}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Reprogramadas"
+                      count={inTransitStageCounts.rescheduled}
+                      active={inTransitStageFilter === 'rescheduled'}
                       disabled={inTransitStageCounts.rescheduled === 0}
                       onClick={() => setInTransitStageFilter('rescheduled')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        inTransitStageFilter === 'rescheduled'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${inTransitStageCounts.rescheduled === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Reprogramadas
-                      <span className="ml-2 text-[11px] opacity-75">{inTransitStageCounts.rescheduled}</span>
-                    </button>
+                    />
                   </div>
                 </div>
               ) : null}
@@ -2219,57 +2625,33 @@ export default function OrdersPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
+                    <FilterChip
+                      label="Todas"
+                      count={finalizedCount}
+                      active={finalizedStageFilter === 'all'}
                       onClick={() => setFinalizedStageFilter('all')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        finalizedStageFilter === 'all'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      }`}
-                    >
-                      Todas
-                      <span className="ml-2 text-[11px] opacity-75">{finalizedCount}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Entregadas"
+                      count={finalizedStageCounts.delivered}
+                      active={finalizedStageFilter === 'delivered'}
                       disabled={finalizedStageCounts.delivered === 0}
                       onClick={() => setFinalizedStageFilter('delivered')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        finalizedStageFilter === 'delivered'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${finalizedStageCounts.delivered === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Entregadas
-                      <span className="ml-2 text-[11px] opacity-75">{finalizedStageCounts.delivered}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Canceladas"
+                      count={finalizedStageCounts.cancelled}
+                      active={finalizedStageFilter === 'cancelled'}
                       disabled={finalizedStageCounts.cancelled === 0}
                       onClick={() => setFinalizedStageFilter('cancelled')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        finalizedStageFilter === 'cancelled'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${finalizedStageCounts.cancelled === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Canceladas
-                      <span className="ml-2 text-[11px] opacity-75">{finalizedStageCounts.cancelled}</span>
-                    </button>
-                    <button
-                      type="button"
+                    />
+                    <FilterChip
+                      label="Reprogramadas"
+                      count={finalizedStageCounts.rescheduled}
+                      active={finalizedStageFilter === 'rescheduled'}
                       disabled={finalizedStageCounts.rescheduled === 0}
                       onClick={() => setFinalizedStageFilter('rescheduled')}
-                      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                        finalizedStageFilter === 'rescheduled'
-                          ? 'border border-slate-300 bg-slate-300 text-slate-800'
-                          : 'border border-transparent bg-white text-slate-600 hover:border-slate-200 hover:text-ink'
-                      } ${finalizedStageCounts.rescheduled === 0 ? 'cursor-default opacity-45' : ''}`}
-                    >
-                      Reprogramadas
-                      <span className="ml-2 text-[11px] opacity-75">{finalizedStageCounts.rescheduled}</span>
-                    </button>
+                    />
                   </div>
                 </div>
               ) : null}
@@ -2279,13 +2661,34 @@ export default function OrdersPage() {
               {(selectableRowIds.size > 0 || selectedPrintableRowsCount > 0) ? (
                 <div className="flex flex-wrap items-center justify-end gap-3">
                   {selectedPrintableRowsCount > 0 ? (
-                    <span className="text-[11px] text-ink/45">
-                      Total seleccionado:{' '}
-                      {formatCurrency(
-                        selectedPrintableRowsTotalAmount,
-                        selectedPrintableRowsCurrency,
-                      )}
-                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedTotalsMode((current) =>
+                          current === 'gross' ? 'estimated' : 'gross',
+                        )
+                      }
+                      className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/90 px-3 py-1.5 text-[11px] text-ink/55 transition hover:border-slate-300 hover:text-ink"
+                    >
+                      <span>
+                        {selectedTotalsMode === 'gross'
+                          ? 'Total venta seleccionado:'
+                          : 'Neto después de cargos ML:'}
+                      </span>
+                      <span className="font-semibold text-night">
+                        {selectedTotalsMode === 'gross'
+                          ? formatCurrency(
+                              selectedPrintableRowsTotalAmount,
+                              selectedPrintableRowsCurrency,
+                            )
+                          : selectedPrintableRowsEstimatedAmount === null
+                            ? 'Sin estimado'
+                            : formatCurrency(
+                                selectedPrintableRowsEstimatedAmount,
+                                selectedPrintableRowsCurrency,
+                              )}
+                      </span>
+                    </button>
                   ) : null}
                   <button
                     type="button"
@@ -2307,6 +2710,65 @@ export default function OrdersPage() {
               title="Ventas"
               description="Órdenes recientes consolidadas en una sola mesa de trabajo"
               searchPlaceholder="Buscar orden o cliente"
+              headerActions={
+                <div ref={shippingTypeMenuRef} className="relative">
+                  <button
+                    type="button"
+                    aria-label="Filtrar por tipo de envío"
+                    title={
+                      shippingTypeFilter === 'all'
+                        ? 'Filtrar por tipo de envío'
+                        : shippingTypeFilter === 'flex'
+                          ? 'Filtro activo: Flex'
+                          : 'Filtro activo: Mercado Envíos'
+                    }
+                    onClick={() => {
+                      setIsPlatformMenuOpen(false);
+                      setIsAccountMenuOpen(false);
+                      setIsShippingTypeMenuOpen((current) => !current);
+                    }}
+                    className={`relative inline-flex h-10 w-10 items-center justify-center rounded-xl border bg-white text-ink transition hover:border-slate-300 ${
+                      shippingTypeFilter === 'all'
+                        ? 'border-black/10'
+                        : 'border-slate-300 bg-slate-50 text-night'
+                    }`}
+                  >
+                    <Filter className="h-4 w-4" />
+                    {shippingTypeFilter !== 'all' ? (
+                      <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-sky" />
+                    ) : null}
+                  </button>
+
+                  {isShippingTypeMenuOpen ? (
+                    <div className="absolute right-0 z-20 mt-2 min-w-[220px] rounded-2xl border border-black/10 bg-white p-2 shadow-xl">
+                      {[
+                        { value: 'all' as const, label: 'Todos los envíos' },
+                        { value: 'flex' as const, label: 'Flex' },
+                        { value: 'mercado_envios' as const, label: 'Mercado Envíos' },
+                      ].map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => {
+                            setShippingTypeFilter(option.value);
+                            setIsShippingTypeMenuOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition ${
+                            shippingTypeFilter === option.value
+                              ? 'bg-slate-100 font-semibold text-night'
+                              : 'text-ink/75 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span>{option.label}</span>
+                          {shippingTypeFilter === option.value ? (
+                            <span className="text-xs text-ink/45">Activo</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              }
             />
           </div>
         )}
@@ -2329,12 +2791,30 @@ export default function OrdersPage() {
         description="Elige una cuenta o sincroniza todas usando el mismo proceso incremental de órdenes nuevas."
       >
         <form className="space-y-5" onSubmit={handleSubmit}>
+          {manualSyncOrders.isPending ? (
+            <div className="overflow-hidden rounded-[1.4rem] border border-sky-200/80 bg-[linear-gradient(135deg,rgba(239,246,255,0.95),rgba(224,242,254,0.92))] p-4 shadow-[0_12px_28px_rgba(14,165,233,0.08)]">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-full bg-white text-sky shadow-sm">
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-sky-950">Sincronización en curso</p>
+                  <p className="mt-1 text-sm text-sky-900/75">
+                    Estamos consultando Mercado Libre y actualizando órdenes. Puedes esperar aquí; te avisaremos al terminar.
+                  </p>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/80 ring-1 ring-sky-200/70">
+                    <div className="h-full w-1/3 animate-[syncShimmer_1.2s_ease-in-out_infinite] rounded-full bg-[linear-gradient(90deg,rgba(14,165,233,0.2),rgba(14,165,233,0.9),rgba(45,212,191,0.6))]" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
           <FieldGroup label="Cuenta" required>
             <select
               required
               value={accountId}
               onChange={(event) => setAccountId(event.target.value)}
-              disabled={accountOptions.length === 1}
+              disabled={accountOptions.length === 1 || manualSyncOrders.isPending}
               className={inputClassName()}
             >
               {accountOptions.length > 1 ? (
@@ -2368,10 +2848,18 @@ export default function OrdersPage() {
                     platform={selectedOrder.platform}
                     className="h-5 w-5 shrink-0"
                   />
-                  <span>
+                  <span className="inline-flex items-center gap-2">
+                    <span>
                     {selectedOrder.packId
                       ? `Pack ${selectedOrder.packId}`
                       : `Orden ${selectedOrder.orderNumber}`}
+                    </span>
+                    <CopyButton
+                      value={selectedOrder.packId ?? selectedOrder.orderNumber}
+                      label={selectedOrder.packId ? 'Copiar pack' : 'Copiar orden'}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                      iconClassName="h-3.5 w-3.5"
+                    />
                   </span>
                 </span>
               )
@@ -2449,40 +2937,40 @@ export default function OrdersPage() {
                   </div>
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-xs uppercase tracking-[0.24em] text-ink/45">
-                        Resumen rápido
-                      </p>
-                      {selectedOrderStatusMeta ? (
-                        <StatusBadge tone={selectedOrderStatusMeta.tone}>
-                          {selectedOrderStatusMeta.label}
-                        </StatusBadge>
-                      ) : null}
-                      {formatOrderShippingTypeLabel(selectedOrder.shippingType) ? (
-                        <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-800">
-                          {formatOrderShippingTypeLabel(selectedOrder.shippingType)}
-                        </span>
-                      ) : null}
-                      {selectedOrder.hasMessages ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
-                          <svg
-                            viewBox="0 0 20 20"
-                            fill="none"
-                            aria-hidden="true"
-                            className="h-3.5 w-3.5"
-                          >
-                            <path
-                              d="M4.167 5.833A2.5 2.5 0 0 1 6.667 3.333h6.666a2.5 2.5 0 0 1 2.5 2.5v4.334a2.5 2.5 0 0 1-2.5 2.5H9.57l-3.086 2.468a.5.5 0 0 1-.817-.39v-2.078a2.5 2.5 0 0 1-1.5-2.287V5.833Z"
-                              stroke="currentColor"
-                              strokeWidth="1.5"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </svg>
-                          {(selectedOrder.unreadMessagesCount ?? 0) > 0
-                            ? `${selectedOrder.unreadMessagesCount ?? 0} mensaje${(selectedOrder.unreadMessagesCount ?? 0) === 1 ? '' : 's'}`
-                            : 'Tiene mensajes'}
-                        </span>
-                      ) : null}
+                        <p className="text-xs uppercase tracking-[0.24em] text-ink/45">
+                          Resumen rápido
+                        </p>
+                        {selectedOrderStatusMeta ? (
+                          <StatusBadge tone={selectedOrderStatusMeta.tone} icon={selectedOrderStatusMeta.icon}>
+                            {selectedOrderStatusMeta.label}
+                          </StatusBadge>
+                        ) : null}
+                        {formatOrderShippingTypeLabel(selectedOrder.shippingType) ? (
+                          <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-800">
+                            {formatOrderShippingTypeLabel(selectedOrder.shippingType)}
+                          </span>
+                        ) : null}
+                        {selectedOrder.hasMessages ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
+                            <svg
+                              viewBox="0 0 20 20"
+                              fill="none"
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5"
+                            >
+                              <path
+                                d="M4.167 5.833A2.5 2.5 0 0 1 6.667 3.333h6.666a2.5 2.5 0 0 1 2.5 2.5v4.334a2.5 2.5 0 0 1-2.5 2.5H9.57l-3.086 2.468a.5.5 0 0 1-.817-.39v-2.078a2.5 2.5 0 0 1-1.5-2.287V5.833Z"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                            {(selectedOrder.unreadMessagesCount ?? 0) > 0
+                              ? `${selectedOrder.unreadMessagesCount ?? 0} mensaje${(selectedOrder.unreadMessagesCount ?? 0) === 1 ? '' : 's'}`
+                              : 'Tiene mensajes'}
+                          </span>
+                        ) : null}
                     </div>
                     <p className="mt-2 text-xl font-semibold tracking-[-0.03em] text-night sm:text-[1.8rem]">
                       {isGroupedSelectedOrder
@@ -2496,22 +2984,22 @@ export default function OrdersPage() {
                     </p>
                   </div>
                   <div className="lg:pl-2">
-                    <div className="inline-flex min-w-[170px] flex-col rounded-[1.5rem] border border-emerald-200/90 bg-[linear-gradient(180deg,rgba(236,253,245,0.98),rgba(209,250,229,0.92))] px-4 py-3 shadow-[0_16px_34px_rgba(16,185,129,0.12)]">
-                      <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-700/80">
-                        Total del pack
-                      </span>
-                      <span className="mt-1 text-3xl font-semibold tracking-[-0.04em] text-emerald-950">
-                        {formatCurrency(
-                          Number(
+                    <div className="inline-flex min-w-[170px] flex-col gap-3 rounded-[1.5rem] border border-emerald-200/90 bg-[linear-gradient(180deg,rgba(236,253,245,0.98),rgba(209,250,229,0.92))] px-4 py-3 shadow-[0_16px_34px_rgba(16,185,129,0.12)]">
+                        <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-700/80">
+                          Total del pack
+                        </span>
+                        <span className="mt-1 text-3xl font-semibold tracking-[-0.04em] text-emerald-950">
+                          {formatCurrency(
+                            Number(
+                              isGroupedSelectedOrder
+                                ? selectedOrder.totalAmount
+                                : selectedOrderDetail.order.totalAmount,
+                            ),
                             isGroupedSelectedOrder
-                              ? selectedOrder.totalAmount
-                              : selectedOrderDetail.order.totalAmount,
-                          ),
-                          isGroupedSelectedOrder
-                            ? selectedOrder.currency
-                            : selectedOrderDetail.order.currency,
-                        )}
-                      </span>
+                              ? selectedOrder.currency
+                              : selectedOrderDetail.order.currency,
+                          )}
+                        </span>
                     </div>
                   </div>
                 </div>
@@ -2541,7 +3029,7 @@ export default function OrdersPage() {
               </div>
 
               {selectedOrderTab === 'products' ? (
-                <div>
+                <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.78fr)]">
                   <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
                     <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
                       {isGroupedSelectedOrder ? 'Órdenes incluidas' : 'Productos'}
@@ -2577,8 +3065,9 @@ export default function OrdersPage() {
                                 {formatCurrency(order.totalAmount, selectedOrder.currency)}
                               </p>
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink/50">
-                                <span className="inline-flex rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-ink/60">
-                                  Orden {order.orderNumber}
+                                <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-ink/60">
+                                  <span>{order.orderNumber}</span>
+                                  <CopyButton value={order.orderNumber} label="Copiar orden" />
                                 </span>
                                 {Number(order.totalUnits ?? 0) > 0 ? (
                                   <span className="inline-flex rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-ink/60">
@@ -2617,8 +3106,9 @@ export default function OrdersPage() {
                                 )}
                               </p>
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink/50">
-                                <span className="inline-flex rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-ink/60">
-                                  Orden {selectedOrderDetail.order.orderNumber}
+                                <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-ink/60">
+                                  <span>{selectedOrderDetail.order.orderNumber}</span>
+                                  <CopyButton value={selectedOrderDetail.order.orderNumber} label="Copiar orden" />
                                 </span>
                                 <span className="inline-flex rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-ink/60">
                                   Cantidad: {item.quantity}
@@ -2632,12 +3122,13 @@ export default function OrdersPage() {
                       )}
                     </div>
                   </section>
+                  {renderOrderSidebar()}
                 </div>
               ) : null}
 
               {selectedOrderTab === 'finance' ? (
                 selectedOrderDetail.mercadolibreFinancials ? (
-                  <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.78fr)]">
+                  <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.78fr)]">
                     <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
                       <div className="flex items-center justify-between gap-3">
                         <div>
@@ -2648,7 +3139,7 @@ export default function OrdersPage() {
                             Desglose financiero de la venta según los pagos registrados por Mercado Libre.
                           </p>
                         </div>
-                        <StatusBadge tone="positive">Neto estimado</StatusBadge>
+                        <StatusBadge tone="positive">Neto después de cargos</StatusBadge>
                       </div>
                       <div className="mt-4 grid gap-3 sm:grid-cols-2">
                         <div className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 shadow-sm">
@@ -2664,7 +3155,7 @@ export default function OrdersPage() {
                         </div>
                         <div className="rounded-2xl border border-emerald-200/80 bg-[linear-gradient(180deg,rgba(236,253,245,0.98),rgba(220,252,231,0.92))] px-4 py-3 shadow-sm">
                           <p className="text-[11px] uppercase tracking-[0.18em] text-emerald-700/75">
-                            Total estimado
+                            Neto después de cargos ML
                           </p>
                           <p className="mt-2 text-lg font-semibold text-emerald-900">
                             {formatCurrency(
@@ -2684,17 +3175,19 @@ export default function OrdersPage() {
                             )}
                           </p>
                         </div>
-                        <div className="rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm">
-                          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/40">
-                            Impuestos ML
-                          </p>
-                          <p className="mt-2 text-sm font-semibold text-rose-700">
-                            {formatCurrency(
-                              selectedOrderDetail.mercadolibreFinancials.taxesAmount,
-                              selectedOrderDetail.order.currency,
-                            )}
-                          </p>
-                        </div>
+                        {Number(selectedOrderDetail.mercadolibreFinancials.taxesAmount) !== 0 ? (
+                          <div className="rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm">
+                            <p className="text-[11px] uppercase tracking-[0.18em] text-ink/40">
+                              Impuestos ML
+                            </p>
+                            <p className="mt-2 text-sm font-semibold text-rose-700">
+                              {formatCurrency(
+                                selectedOrderDetail.mercadolibreFinancials.taxesAmount,
+                                selectedOrderDetail.order.currency,
+                              )}
+                            </p>
+                          </div>
+                        ) : null}
                         {selectedOrderDetail.mercadolibreFinancials.bonusAmount > 0 ? (
                           <div className="rounded-2xl border border-emerald-200/80 bg-[linear-gradient(180deg,rgba(236,253,245,0.98),rgba(220,252,231,0.92))] px-4 py-3 shadow-sm">
                             <p className="text-[11px] uppercase tracking-[0.18em] text-emerald-700/75">
@@ -2746,160 +3239,234 @@ export default function OrdersPage() {
                       </div>
                     </section>
 
-                    <section className="space-y-5">
-                      <div className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
-                        <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
-                          Contexto de pago
-                        </p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {selectedOrderDetail.mercadolibreFinancials.installments ? (
-                            <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-ink/70">
-                              {selectedOrderDetail.mercadolibreFinancials.installments} cuota
-                              {selectedOrderDetail.mercadolibreFinancials.installments === 1 ? '' : 's'}
-                            </span>
-                          ) : null}
-                          {selectedOrderDetail.mercadolibreFinancials.authorizationCode ? (
-                            <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-ink/70">
-                              Autorización {selectedOrderDetail.mercadolibreFinancials.authorizationCode}
-                            </span>
-                          ) : null}
-                          {!selectedOrderDetail.mercadolibreFinancials.installments &&
-                          !selectedOrderDetail.mercadolibreFinancials.authorizationCode ? (
-                            <p className="text-sm text-ink/55">Sin metadata adicional de pago.</p>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
-                        <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
-                          Lectura rápida
-                        </p>
-                        <div className="mt-3 space-y-2 text-sm text-ink/75">
-                          <p>Este bloque muestra el neto estimado que deja Mercado Libre antes del costo del producto.</p>
-                          <p>Si luego quieres utilidad real, ahí sí conviene restar el costo de compra interno.</p>
-                        </div>
-                      </div>
-                    </section>
+                    {renderOrderSidebar()}
                   </div>
                 ) : (
-                  <div className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-10 text-center shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
-                    <p className="text-sm font-medium text-night">Sin detalle financiero de Mercado Libre</p>
-                    <p className="mt-2 text-sm text-ink/55">
-                      Esta orden todavía no trae pagos suficientes para mostrar el desglose financiero.
-                    </p>
+                  <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.78fr)]">
+                    <div className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-10 text-center shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
+                      <p className="text-sm font-medium text-night">Sin detalle financiero de Mercado Libre</p>
+                      <p className="mt-2 text-sm text-ink/55">
+                        Esta orden todavía no trae pagos suficientes para mostrar el desglose financiero.
+                      </p>
+                    </div>
+                    {renderOrderSidebar()}
                   </div>
                 )
               ) : null}
 
               {selectedOrderTab === 'activity' ? (
-                <div className="grid gap-5 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-                  <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)] lg:col-span-2">
-                    <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
-                      Entrega
-                    </p>
-                    <div className="mt-4 space-y-4 text-sm text-ink/75">
-                      <div className="space-y-1">
-                        <p className="font-semibold text-night">
-                          {selectedOrderDetail.order.shippingName || 'Sin destinatario'}
-                        </p>
-                        <p className="text-sm leading-7 text-night">
-                          {[
-                            selectedOrderDetail.order.shippingAddress1,
-                            selectedOrderDetail.order.shippingAddress2,
-                            selectedOrderDetail.order.shippingCity,
-                            selectedOrderDetail.order.shippingRegion,
-                            selectedOrderDetail.order.shippingPostalCode,
-                            selectedOrderDetail.order.shippingCountry,
-                          ]
-                            .filter(Boolean)
-                            .join(', ') || 'Sin dirección completa'}
-                        </p>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 shadow-sm">
-                          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/40">
-                            Comuna
+                <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.78fr)]">
+                  <div className="space-y-5">
+                    <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
+                      <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
+                        Entrega
+                      </p>
+                      <div className="mt-4 space-y-4 text-sm text-ink/75">
+                        <div className="space-y-1">
+                          <p className="font-semibold text-night">
+                            {selectedOrderDetail.order.shippingName || 'Sin destinatario'}
                           </p>
-                          <p className="mt-2 font-medium text-night">
-                            {selectedOrderDetail.order.shippingCity || 'Sin comuna'}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 shadow-sm">
-                          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/40">
-                            Región y país
-                          </p>
-                          <p className="mt-2 font-medium text-night">
+                          <p className="text-sm leading-7 text-night">
                             {[
+                              selectedOrderDetail.order.shippingAddress1,
+                              selectedOrderDetail.order.shippingAddress2,
+                              selectedOrderDetail.order.shippingCity,
                               selectedOrderDetail.order.shippingRegion,
+                              selectedOrderDetail.order.shippingPostalCode,
                               selectedOrderDetail.order.shippingCountry,
                             ]
                               .filter(Boolean)
-                              .join(' · ') || 'Sin región'}
+                              .join(', ') || 'Sin dirección completa'}
                           </p>
                         </div>
-                      </div>
-                    </div>
-                  </section>
-                  <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
-                    <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
-                      Seguimiento interno
-                    </p>
-                    <div className="mt-3 space-y-3 text-sm text-ink/75">
-                      <p>
-                        Asignado a:{' '}
-                        <span className="font-semibold text-night">
-                          {selectedOrderDetail.assignment?.user?.fullName ||
-                            selectedOrderDetail.assignment?.user?.email ||
-                            'Sin asignación'}
-                        </span>
-                      </p>
-                      {selectedOrderDetail.assignment?.note ? (
-                        <div className="rounded-2xl border border-slate-200/80 bg-slate-50 px-4 py-3 text-ink/70">
-                          {selectedOrderDetail.assignment.note}
-                        </div>
-                      ) : (
-                        <p className="text-ink/55">Sin nota interna.</p>
-                      )}
-                      {selectedOrderDetail.tags?.length ? (
-                        <div className="flex flex-wrap gap-2">
-                          {selectedOrderDetail.tags.map((tag, index) => (
-                            <span
-                              key={`${tag.name}-${index}`}
-                              className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700"
-                            >
-                              {tag.name || 'Tag'}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  </section>
-
-                  <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
-                    <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
-                      Comentarios
-                    </p>
-                    <div className="mt-3 space-y-3">
-                      {selectedOrderDetail.comments?.length ? (
-                        selectedOrderDetail.comments.slice(0, 6).map((comment, index) => (
-                          <div
-                            key={`${comment.createdAt}-${index}`}
-                            className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 text-sm text-ink/75"
-                          >
-                            <p className="font-semibold text-night">
-                              {comment.user?.fullName || comment.user?.email || 'Equipo'}
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 shadow-sm">
+                            <p className="text-[11px] uppercase tracking-[0.18em] text-ink/40">
+                              Comuna
                             </p>
-                            <p className="mt-1">{comment.body || 'Sin comentario'}</p>
+                            <p className="mt-2 font-medium text-night">
+                              {selectedOrderDetail.order.shippingCity || 'Sin comuna'}
+                            </p>
                           </div>
-                        ))
-                      ) : (
-                        <p className="text-sm text-ink/55">Sin comentarios recientes.</p>
-                      )}
-                    </div>
-                  </section>
+                          <div className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 shadow-sm">
+                            <p className="text-[11px] uppercase tracking-[0.18em] text-ink/40">
+                              Región y país
+                            </p>
+                            <p className="mt-2 font-medium text-night">
+                              {[
+                                selectedOrderDetail.order.shippingRegion,
+                                selectedOrderDetail.order.shippingCountry,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ') || 'Sin región'}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                    <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
+                      <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
+                        Seguimiento interno
+                      </p>
+                      <div className="mt-3 space-y-3 text-sm text-ink/75">
+                        <p>
+                          Asignado a:{' '}
+                          <span className="font-semibold text-night">
+                            {selectedOrderDetail.assignment?.user?.fullName ||
+                              selectedOrderDetail.assignment?.user?.email ||
+                              'Sin asignación'}
+                          </span>
+                        </p>
+                        {selectedOrderDetail.assignment?.note ? (
+                          <div className="rounded-2xl border border-slate-200/80 bg-slate-50 px-4 py-3 text-ink/70">
+                            {selectedOrderDetail.assignment.note}
+                          </div>
+                        ) : (
+                          <p className="text-ink/55">Sin nota interna.</p>
+                        )}
+                        {selectedOrderDetail.tags?.length ? (
+                          <div className="flex flex-wrap gap-2">
+                            {selectedOrderDetail.tags.map((tag, index) => (
+                              <span
+                                key={`${tag.name}-${index}`}
+                                className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700"
+                              >
+                                {tag.name || 'Tag'}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    </section>
+                    <section className="rounded-[1.7rem] border border-slate-200/80 bg-white px-5 py-5 shadow-[0_12px_30px_rgba(15,23,42,0.05)]">
+                      <p className="text-xs uppercase tracking-[0.22em] text-ink/45">
+                        Comentarios
+                      </p>
+                      <div className="mt-3 space-y-3">
+                        {selectedOrderDetail.comments?.length ? (
+                          selectedOrderDetail.comments.slice(0, 6).map((comment, index) => (
+                            <div
+                              key={`${comment.createdAt}-${index}`}
+                              className="rounded-2xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(248,250,252,0.88),rgba(255,255,255,0.96))] px-4 py-3 text-sm text-ink/75"
+                            >
+                              <p className="font-semibold text-night">
+                                {comment.user?.fullName || comment.user?.email || 'Equipo'}
+                              </p>
+                              <p className="mt-1">{comment.body || 'Sin comentario'}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-ink/55">Sin comentarios recientes.</p>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                  {renderOrderSidebar()}
                 </div>
               ) : null}
             </div>
           )
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(pendingCancelOrder)}
+        onClose={() => {
+          if (cancelOrdersMutation.isPending) {
+            return;
+          }
+
+          setPendingCancelOrder(null);
+          setCancelReason('');
+        }}
+        title="Estás por cancelar"
+      >
+        {pendingCancelOrder ? (
+          <div className="space-y-6">
+            <div className="inline-flex w-full items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-800">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>Recuerda que hacer esto afecta tu reputación.</span>
+            </div>
+
+            <p className="text-sm leading-6 text-ink/70">
+              Al cancelarla, se va a revertir la operación en Eselink. Si luego quieres reflejar un
+              motivo interno distinto, podemos guardarlo también.
+            </p>
+
+            <div className="grid grid-cols-[64px_minmax(0,1fr)_auto_auto] items-center gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+              {normalizeImageUrl(pendingCancelOrder.productImageUrl) ? (
+                <img
+                  src={normalizeImageUrl(pendingCancelOrder.productImageUrl)!}
+                  alt={pendingCancelOrder.productTitle ?? 'Producto de la orden'}
+                  className="h-16 w-16 rounded-2xl object-cover ring-1 ring-slate-200"
+                />
+              ) : (
+                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink/40">
+                  Sin foto
+                </div>
+              )}
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-night">
+                  {pendingCancelOrder.productTitle ?? 'Producto sin título'}
+                </p>
+                <p className="mt-1 text-xs text-ink/50">
+                  {pendingCancelOrder.packId
+                    ? `Pack ${pendingCancelOrder.packId}`
+                    : pendingCancelOrder.orderNumber}
+                </p>
+              </div>
+              <div className="text-sm font-medium text-ink/55">
+                {formatCurrency(Number(pendingCancelOrder.totalAmount), pendingCancelOrder.currency)}
+              </div>
+              <div className="text-sm font-medium text-ink/55">
+                {(pendingCancelOrder.individualOrders?.length ?? pendingCancelOrder.totalUnits ?? 1)} u.
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <p className="text-sm font-semibold text-night">¿Cuál es el motivo de tu decisión?</p>
+              <div className="space-y-3">
+                {CANCEL_REASON_OPTIONS.map((reason) => (
+                  <label
+                    key={reason}
+                    className="flex cursor-pointer items-center gap-3 text-sm text-ink/75"
+                  >
+                    <input
+                      type="radio"
+                      name="cancel-reason"
+                      value={reason}
+                      checked={cancelReason === reason}
+                      onChange={() => setCancelReason(reason)}
+                      className="h-4 w-4 border-slate-300 text-night focus:ring-night/20"
+                    />
+                    <span>{reason}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingCancelOrder(null);
+                  setCancelReason('');
+                }}
+                disabled={cancelOrdersMutation.isPending}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-ink/70 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Volver
+              </button>
+              <button
+                type="button"
+                onClick={confirmCancelOrder}
+                disabled={!cancelReason || cancelOrdersMutation.isPending}
+                className="rounded-xl border border-rose-300/80 bg-rose-50/90 px-5 py-2.5 text-sm font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {cancelOrdersMutation.isPending ? 'Cancelando...' : 'Cancelar orden'}
+              </button>
+            </div>
+          </div>
         ) : null}
       </Modal>
     </>
