@@ -27,7 +27,6 @@ PROJECT_COLORS=(
 
 command -v pnpm >/dev/null 2>&1 || { echo "Error: pnpm no esta instalado."; exit 1; }
 command -v lsof >/dev/null 2>&1 || { echo "Error: lsof no esta instalado."; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo "Error: docker no esta instalado."; exit 1; }
 command -v concurrently >/dev/null 2>&1 || {
   echo "Instalando 'concurrently' global..."
   npm i -g concurrently
@@ -55,15 +54,26 @@ docker_compose() {
 
 cd "$ROOT_DIR"
 
-echo "Reiniciando infraestructura Docker..."
-docker_compose down --remove-orphans || true
+read -r -p "Reiniciar infraestructura Docker? (S/N): " RESTART_DOCKER
+RESTART_DOCKER="$(printf '%s' "$RESTART_DOCKER" | tr '[:lower:]' '[:upper:]')"
+
+if [[ "$RESTART_DOCKER" == "S" ]]; then
+  command -v docker >/dev/null 2>&1 || { echo "Error: docker no esta instalado."; exit 1; }
+  echo "Reiniciando infraestructura Docker..."
+  docker_compose down --remove-orphans || true
+elif [[ "$RESTART_DOCKER" != "N" ]]; then
+  echo "Opcion invalida. Usa S o N."
+  exit 1
+fi
 
 for PORT in "${PROJECT_PORTS[@]}"; do
   kill_listener "$PORT"
 done
 
-docker_compose up -d
-echo
+if [[ "$RESTART_DOCKER" == "S" ]]; then
+  docker_compose up -d
+  echo
+fi
 
 NAMES=()
 CMDS=()

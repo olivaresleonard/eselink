@@ -3,7 +3,16 @@
 import { useSearchParams } from 'next/navigation';
 import type { PlatformCode } from '../../types/eselink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FormEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  FormEvent,
+  Suspense,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { inputClassName } from '../../components/form-field';
 import { PlatformLogo } from '../../components/platform-brand';
 import { PageShell } from '../../components/page-shell';
@@ -223,7 +232,7 @@ function MetaChip({
 const MESSAGES_CACHE_KEY = 'messages:conversation-cache';
 const MESSAGES_READ_OVERRIDES_KEY = 'messages:read-overrides';
 
-export default function MessagesPage() {
+function MessagesPageContent() {
   const searchParams = useSearchParams();
   const requestedConversationId = searchParams.get('conversationId');
   const queryClient = useQueryClient();
@@ -1127,5 +1136,13 @@ export default function MessagesPage() {
         </section>
       </section>
     </PageShell>
+  );
+}
+
+export default function MessagesPage() {
+  return (
+    <Suspense fallback={null}>
+      <MessagesPageContent />
+    </Suspense>
   );
 }
